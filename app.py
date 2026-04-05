@@ -173,7 +173,7 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
             cell.font=gfont(color=rc); cell.fill=gfill(WHITE)
             cell.alignment=Alignment(horizontal='right' if c>=5 else 'left',vertical='center',wrap_text=False)
             if isn: cell.number_format='#,##0.00'
-        nc=ws.cell(rn,13); nc.value=note or None; nc.font=gfont(color=BLACK)
+        nc=ws.cell(rn,13); nc.value=None; nc.font=gfont(color=BLACK)
         nc.fill=gfill(WHITE); nc.alignment=Alignment(horizontal='center',vertical='center',wrap_text=False)
         nc.number_format='@'
     # Write main data rows (positive charges)
