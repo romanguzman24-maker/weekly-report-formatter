@@ -123,42 +123,47 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
     tab=f'{"SUB AR" if is_sub else "Tenant AR"} {date}'
     if tab in wb_out.sheetnames: del wb_out[tab]
     ws=wb_out.create_sheet(tab); MC=13
-    # Title rows 1-3
+    # Title rows 1-3 — green, no borders
     for ti in range(3):
         for c in range(1,MC+1):
             ws.cell(ti+1,c).fill=gfill(GREEN); ws.cell(ti+1,c).font=gfont(color=tc)
             ws.cell(ti+1,c).alignment=Alignment(horizontal='center',vertical='center',wrap_text=False)
         ws.cell(ti+1,1).value=str(rr[ti][0] if ti<len(rr) and rr[ti] else '')
-    h4=['','','','','Total','','','','','','','',NL]
+    # Header rows 4-6 — gray, NO borders, NO label in row 4 col M
+    h4=['','','','','Total','','','','','','','','']   # col M row 4 = blank
     h5=['','','','','Unpaid','0-30','31-60','61-90','Over 90','','','','']
     h6=['Unit','Resident','Status','Name','Charges','days','days','days','days','Prepays','Suspense','Balance',NL]
-    bd=bblack()
     for c in range(1,MC+1):
         ra=5<=c<=12
         for ri,hdr in [(4,h4),(5,h5),(6,h6)]:
             cell=ws.cell(ri,c); cell.value=hdr[c-1]; cell.font=gfont(bold=True)
-            cell.fill=gfill(GRAY_AR); cell.border=bd
-            cell.alignment=Alignment(horizontal='right' if ra else ('center' if c==13 else 'left'),vertical='center',wrap_text=False)
+            cell.fill=gfill(GRAY_AR)  # NO border on rows 4-6
+            cell.alignment=Alignment(horizontal='right' if ra else ('left' if c!=13 else 'left'),vertical='center',wrap_text=False)
     for r in range(1,4): ws.cell(r,13).fill=gfill(GREEN); ws.cell(r,13).font=gfont(color=tc)
+    # Parse data
     hi=next((i for i,r in enumerate(rr[:10]) if r and any(str(c or '').lower()=='unit' for c in r) and any(str(c or '').lower()=='resident' for c in r)),5)
-    ev,cu,no=[],[],[]
+    ev,cu,no,cr=[],[],[],[]  # cr = credits (negative charges)
     for row in rr[hi+1:]:
         if not row or all(c is None or c=='' for c in row): continue
         st=str(row[2] or '').strip().lower(); u=str(row[0] or '').strip()
-        if re.search(r'subtotal|village at',u,re.I): continue
+        if re.search(r'subtotal|village at|^total$',u,re.I): continue
         if not u or not re.match(r'^\d{2}',u): continue
-        if st in ('eviction','past'): ev.append(row)
+        charges=row[4]
+        try: charge_val=float(str(charges or 0).replace(',',''))
+        except: charge_val=0
+        # Separate credits (negative total unpaid charges) into their own section
+        if charge_val < 0:
+            cr.append(row)
+        elif st in ('eviction','past'): ev.append(row)
         elif st=='notice': no.append(row)
         else: cu.append(row)
     def sk(r):
         try: return -(float(str(r[4] or 0).replace(',','')))
         except: return 0
     ev.sort(key=sk); cu.sort(key=sk); no.sort(key=sk)
-    rn=7
-    for row in ev+cu+no:
+    # Write a row of data
+    def write_row(rn, row, rc):
         rid=str(row[1] or '').strip(); note=prev_notes.get(rid,'')
-        st=str(row[2] or '').strip().lower()
-        rc=RED_FONT if (not is_sub and st in ('notice','eviction','past')) else BLACK
         for c in range(1,13):
             v=row[c-1]; sv=str(v if v is not None else '').strip()
             try: num=float(sv.replace(',',''))
@@ -168,21 +173,46 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
             cell.font=gfont(color=rc); cell.fill=gfill(WHITE)
             cell.alignment=Alignment(horizontal='right' if c>=5 else 'left',vertical='center',wrap_text=False)
             if isn: cell.number_format='#,##0.00'
-        # Notes col M — no border, no wrap
         nc=ws.cell(rn,13); nc.value=note or None; nc.font=gfont(color=BLACK)
         nc.fill=gfill(WHITE); nc.alignment=Alignment(horizontal='left',vertical='center',wrap_text=False)
         nc.number_format='@'
-        rn+=1
-    # Total row — keep borders on total row only
+    # Write main data rows (positive charges)
+    data_start=7; rn=data_start
+    for row in ev+cu+no:
+        st=str(row[2] or '').strip().lower()
+        rc=RED_FONT if (not is_sub and st in ('notice','eviction','past')) else BLACK
+        write_row(rn,row,rc); rn+=1
+    # Total row (positives only)
     tb=bblack()
-    ws.cell(rn,1).value='Total'; ws.cell(rn,1).font=gfont(bold=True); ws.cell(rn,1).fill=gfill(WHITE); ws.cell(rn,1).border=tb
-    for c in range(5,13):
-        cell=ws.cell(rn,c); cell.value=f'=SUM({get_column_letter(c)}7:{get_column_letter(c)}{rn-1})'
-        cell.font=gfont(bold=True); cell.fill=gfill(WHITE); cell.border=tb; cell.number_format='#,##0.00'
-    for c in [2,3,4,13]: ws.cell(rn,c).fill=gfill(WHITE); ws.cell(rn,c).font=gfont(bold=True); ws.cell(rn,c).border=tb
+    pos_end=rn-1
+    def write_total(rn, start, end, label='Total'):
+        ws.cell(rn,1).value=label; ws.cell(rn,1).font=gfont(bold=True); ws.cell(rn,1).fill=gfill(WHITE); ws.cell(rn,1).border=tb
+        for c in range(5,13):
+            cell=ws.cell(rn,c)
+            cell.value=f'=SUM({get_column_letter(c)}{start}:{get_column_letter(c)}{end})'
+            cell.font=gfont(bold=True); cell.fill=gfill(WHITE); cell.border=tb; cell.number_format='#,##0.00'
+        for c in [2,3,4,13]: ws.cell(rn,c).fill=gfill(WHITE); ws.cell(rn,c).font=gfont(bold=True); ws.cell(rn,c).border=tb
+    write_total(rn,data_start,pos_end); rn+=1
+    # Credits section — blank row, then header, then credit rows, then credits total
+    if cr:
+        rn+=1  # blank separator
+        # Credits header row
+        for c in range(1,MC+1):
+            cell=ws.cell(rn,c); cell.fill=gfill(GRAY_AR); cell.font=gfont(bold=True)
+            cell.alignment=Alignment(horizontal='left',vertical='center',wrap_text=False)
+        ws.cell(rn,1).value='Credits'; ws.cell(rn,4).value='Name'
+        ws.cell(rn,5).value='Charges'; ws.cell(rn,10).value='Prepays'; ws.cell(rn,11).value='Suspense'; ws.cell(rn,12).value='Balance'
+        for c in [5,10,11,12]: ws.cell(rn,c).alignment=Alignment(horizontal='right',vertical='center',wrap_text=False)
+        rn+=1
+        cr_start=rn
+        for row in cr:
+            write_row(rn,row,BLACK); rn+=1
+        cr_end=rn-1
+        write_total(rn,cr_start,cr_end,'Credits Total'); rn+=1
     for i,w in enumerate([9,13,10,24,12,10,10,10,10,10,10,12,38],1): ws.column_dimensions[get_column_letter(i)].width=w
     ws.freeze_panes='A7'
-    return ws, len(ev), len(cu), len(no)
+    # Return the positive total for Weekly Summary (excludes credits)
+    return ws, len(ev), len(cu), len(no), pos_end, data_start
 
 def fmt_rr(wb_out, raw_bytes, date, prop):
     wb_r=openpyxl.load_workbook(io.BytesIO(raw_bytes),data_only=True,keep_vba=False,read_only=True)
@@ -235,7 +265,9 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
             for col,dv in [(10,mi),(11,lt),(12,None)]:
                 cell=ws.cell(rn,col); cell.value=dv; cell.font=gfont(color=fc); cell.fill=gfill(WHITE)
                 cell.alignment=Alignment(horizontal='center',vertical='center',wrap_text=False)
-                if isinstance(dv,(int,float)) and dv: cell.number_format='MM/DD/YY'
+                import datetime as _dt
+                if dv is not None and (isinstance(dv,_dt.datetime) or (isinstance(dv,(int,float)) and dv>40000)):
+                    cell.number_format='MM/DD/YY'
             ws.cell(rn,13).value=0; ws.cell(rn,13).font=gfont(color=fc); ws.cell(rn,13).fill=gfill(WHITE)
             ws.cell(rn,13).alignment=Alignment(horizontal='right',vertical='center',wrap_text=False); ws.cell(rn,13).number_format='#,##0.00'
             ws.row_dimensions[rn].height=15.0; rn+=1
@@ -414,6 +446,7 @@ def build_weekly_summary(wb_out, wb_ro, date, ua_ws=None, tar_ws=None, sar_ws=No
         ws['B11']=-ev; ws['B14']=b14; ws['F14']=f14
 
     def getT(aw):
+        # Sum Total Unpaid Charges from the main Total row (positive charges only, before Credits section)
         if not aw: return 0
         for r in range(7,aw.max_row+1):
             if str(aw.cell(r,1).value or '').lower()=='total':
