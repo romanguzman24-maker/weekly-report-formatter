@@ -219,14 +219,15 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
     rr=list(wb_r.active.iter_rows(values_only=True)); wb_r.close()
     tab=f'Rent Roll {date}'
     if tab in wb_out.sheetnames: del wb_out[tab]
-    ws=wb_out.create_sheet(tab); MC=13  # No comments column
+    ws=wb_out.create_sheet(tab); MC=13
     for ti,(text,bold) in enumerate(zip(['Rent Roll',prop,f'As Of = {date}','Month Year'],[True,False,True,False])):
         for c in range(1,MC+1):
             ws.cell(ti+1,c).fill=gfill(GREEN); ws.cell(ti+1,c).font=gfont(bold=bold)
             ws.cell(ti+1,c).alignment=Alignment(horizontal='left',vertical='center',wrap_text=False)
         ws.cell(ti+1,1).value=text
-    h5=['Unit','Unit Type','Unit','Resident','Name','Market','Actual','Resident','Other','Move In','Lease','Move Out','Balance']
-    h6=['\xa0','\xa0','Sq Ft','\xa0','\xa0','Rent','Rent','Deposit','Deposit','\xa0','Expiration','\xa0','\xa0']
+    # Columns: A=Unit B=UnitType C=UnitSetAside D=SqFt E=Resident F=Name G=MarketRent H=ActualRent I=ResDeposit J=MoveIn K=LeaseExpiration L=MoveOut M=Balance
+    h5=['Unit','Unit Type','Unit Set Aside','Sq Ft','Resident','Name','Market','Actual','Resident','Move In','Lease','Move Out','Balance']
+    h6=['\xa0','\xa0','\xa0','\xa0','\xa0','\xa0','Rent','Rent','Deposit','\xa0','Expiration','\xa0','\xa0']
     for c in range(1,MC+1):
         c5=ws.cell(5,c); c5.value=h5[c-1]; c5.font=gfont(bold=True); c5.fill=gfill(GRAY_HDR)
         c5.alignment=Alignment(horizontal='center',vertical='center',wrap_text=False)
@@ -242,6 +243,19 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         if 'VACANT' in rname or not rname: V.append(row)
         else: O.append(row)
     V.sort(key=lambda r:str(r[1] or '')); O.sort(key=lambda r:str(r[1] or ''))
+
+    def set_aside(unit_type):
+        """Decode last char of Unit Type code to set-aside category"""
+        code=str(unit_type or '').strip()
+        if not code: return ''
+        last=code[-1].upper()
+        if last=='3': return '30%'
+        if last=='5': return '50%'
+        if last=='6': return '60%'
+        if last=='M': return 'Exempt Unit'
+        return ''
+
+    import datetime as _dt
     rn=7
     for rows,fc in [(V,RED_FONT),(O,BLACK)]:
         for row in rows:
@@ -253,25 +267,26 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
                 cell=ws.cell(__rn,col); cell.value=val; cell.font=gfont(color=__fc); cell.fill=gfill(WHITE)
                 cell.alignment=Alignment(horizontal=h,vertical='center',wrap_text=False)
                 if fmt: cell.number_format=fmt
-            sc(1,unit); sc(2,ut)
-            ws.cell(rn,3).value=sq or 0; ws.cell(rn,3).font=gfont(color=fc); ws.cell(rn,3).fill=gfill(WHITE)
-            ws.cell(rn,3).alignment=Alignment(horizontal='right',vertical='center',wrap_text=False); ws.cell(rn,3).number_format='#,##0'
-            sc(4,'VACANT' if isvac else rname); sc(5,'VACANT' if isvac else rname)
-            for col,val in [(6,mr),(7,tr),(8,dep)]:
+            sc(1,unit)                                          # A: Unit
+            sc(2,ut)                                           # B: Unit Type
+            sc(3,set_aside(ut))                                # C: Unit Set Aside (decoded)
+            ws.cell(rn,4).value=sq or 0; ws.cell(rn,4).font=gfont(color=fc); ws.cell(rn,4).fill=gfill(WHITE)  # D: Sq Ft
+            ws.cell(rn,4).alignment=Alignment(horizontal='right',vertical='center',wrap_text=False); ws.cell(rn,4).number_format='#,##0'
+            sc(5,'VACANT' if isvac else rname)                 # E: Resident
+            sc(6,'VACANT' if isvac else rname)                 # F: Name
+            for col,val in [(7,mr),(8,tr),(9,dep)]:            # G: Market Rent  H: Actual Rent  I: Res Deposit
                 ws.cell(rn,col).value=val or 0; ws.cell(rn,col).font=gfont(color=fc); ws.cell(rn,col).fill=gfill(WHITE)
                 ws.cell(rn,col).alignment=Alignment(horizontal='right',vertical='center',wrap_text=False); ws.cell(rn,col).number_format='#,##0.00'
-            sc(9,0,h='right')
-            # Date cols 10=MoveIn, 11=LeaseExpiration, 12=MoveOut — MM/DD/YY format
+            # J: Move In  K: Lease Expiration  L: Move Out
             for col,dv in [(10,mi),(11,lt),(12,None)]:
                 cell=ws.cell(rn,col); cell.value=dv; cell.font=gfont(color=fc); cell.fill=gfill(WHITE)
                 cell.alignment=Alignment(horizontal='center',vertical='center',wrap_text=False)
-                import datetime as _dt
                 if dv is not None and (isinstance(dv,_dt.datetime) or (isinstance(dv,(int,float)) and dv>40000)):
                     cell.number_format='MM/DD/YY'
-            ws.cell(rn,13).value=0; ws.cell(rn,13).font=gfont(color=fc); ws.cell(rn,13).fill=gfill(WHITE)
+            ws.cell(rn,13).value=0; ws.cell(rn,13).font=gfont(color=fc); ws.cell(rn,13).fill=gfill(WHITE)  # M: Balance
             ws.cell(rn,13).alignment=Alignment(horizontal='right',vertical='center',wrap_text=False); ws.cell(rn,13).number_format='#,##0.00'
             ws.row_dimensions[rn].height=15.0; rn+=1
-    for col,w in {'A':9,'B':12,'C':7,'D':13,'E':22,'F':11,'G':11,'H':11,'I':11,'J':11,'K':13,'L':11,'M':10}.items():
+    for col,w in {'A':9,'B':12,'C':13,'D':7,'E':13,'F':22,'G':11,'H':11,'I':11,'J':11,'K':13,'L':11,'M':10}.items():
         ws.column_dimensions[col].width=w
     ws.freeze_panes='A7'
     return ws, len(V), len(O)
