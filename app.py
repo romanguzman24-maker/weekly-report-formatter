@@ -276,7 +276,7 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
     ws.freeze_panes='A7'
     return ws, len(V), len(O)
 
-def build_weekly_summary(wb_out, wb_ro, date, ua_ws=None, tar_ws=None, sar_ws=None):
+def build_weekly_summary(wb_out, wb_ro, date, ua_ws=None, tar_ws=None, sar_ws=None, tar_total=0, sar_total=0):
     """Build Weekly Summary — exact match to your real file, all borders/colors/values correct"""
     ws_name=next((n for n in wb_ro.sheetnames if 'weekly summary' in n.lower()),None)
     if not ws_name: return
@@ -453,7 +453,10 @@ def build_weekly_summary(wb_out, wb_ro, date, ua_ws=None, tar_ws=None, sar_ws=No
                 try: return float(aw.cell(r,5).value or 0)
                 except: return 0
         return 0
-    tar_total=getT(tar_ws); sar_total=getT(sar_ws)
+    # Use pre-computed totals passed in from format_report (avoids reading formula cells)
+    # Fall back to getT if not provided
+    if tar_total==0 and tar_ws: tar_total=getT(tar_ws)
+    if sar_total==0 and sar_ws: sar_total=getT(sar_ws)
     ws['C18']=tar_total
     ws['C19']=sar_total
     # C20 total AR — direct value so it shows even without formula recalc
@@ -490,23 +493,48 @@ def format_report():
         if not wb_file:
             return jsonify({'error':'Working workbook is required'}),400
         wb_bytes=wb_file.read()
-        # Use read_only for speed — 0.4s instead of 4s
         wb_ro=openpyxl.load_workbook(io.BytesIO(wb_bytes),data_only=True,keep_vba=False,read_only=True)
         pTAR=get_notes(wb_ro,'Tenant AR')
         pSAR=get_notes(wb_ro,'Sub AR')
         pSAR.update(get_notes(wb_ro,'SUB AR'))
         wb_out=openpyxl.Workbook(); wb_out.remove(wb_out.active)
+
+        # Build tabs — collect AR totals directly from parsed data
         ua_ws=tar_ws=sar_ws=None
+        tar_total=sar_total=0
+
         ua_f=request.files.get('ua')
         if ua_f: ua_ws,*_=fmt_ua(wb_out,ua_f.read(),date,prop)
+
         tar_f=request.files.get('tar')
-        if tar_f: tar_ws,*_=fmt_ar(wb_out,tar_f.read(),date,pTAR,False)
+        if tar_f:
+            tar_ws,ev,cu,no,pos_end,data_start=fmt_ar(wb_out,tar_f.read(),date,pTAR,False)
+            # Sum Total Unpaid Charges (col 5) from positive rows only
+            for r in range(data_start,pos_end+1):
+                try: tar_total+=float(tar_ws.cell(r,5).value or 0)
+                except: pass
+
         sar_f=request.files.get('sar')
-        if sar_f: sar_ws,*_=fmt_ar(wb_out,sar_f.read(),date,pSAR,True)
+        if sar_f:
+            sar_ws,ev,cu,no,pos_end,data_start=fmt_ar(wb_out,sar_f.read(),date,pSAR,True)
+            for r in range(data_start,pos_end+1):
+                try: sar_total+=float(sar_ws.cell(r,5).value or 0)
+                except: pass
+
         rr_f=request.files.get('rr')
         if rr_f: fmt_rr(wb_out,rr_f.read(),date,prop)
-        build_weekly_summary(wb_out,wb_ro,date,ua_ws,tar_ws,sar_ws)
+
+        # Build Weekly Summary — pass totals directly so no formula evaluation needed
+        build_weekly_summary(wb_out,wb_ro,date,ua_ws,tar_ws,sar_ws,tar_total,sar_total)
         wb_ro.close()
+
+        # Reorder tabs: Weekly Summary → Unit Availability → Rent Roll → Tenant AR → SUB AR
+        desired_order=['Weekly Summary ','Unit Availability '+date,'Rent Roll '+date,'Tenant AR '+date,'SUB AR '+date]
+        current=wb_out.sheetnames
+        ordered=[t for t in desired_order if t in current]+[t for t in current if t not in desired_order]
+        for i,name in enumerate(ordered):
+            wb_out.move_sheet(name,offset=-wb_out.sheetnames.index(name)+i)
+
         out=io.BytesIO(); wb_out.save(out); out.seek(0)
         prefix=prop.split('(')[0].strip().replace(' ','_')
         fname=f'{prefix}_Weekly_{date.replace(".","")}_Formatted.xlsx'
