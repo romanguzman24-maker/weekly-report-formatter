@@ -56,7 +56,7 @@ def fmt_ua(wb_out, raw_bytes, date, prop):
         ['Unit Availability Details ',prop,f'As Of: {date}','Showing Pre-Leased: Yes','Showing Occupied: Yes'],
         [True,False,True,False,False])):
         r=ti+1
-        for c in range(1,MC+1): ws.cell(r,c).fill=gfill(GREEN); ws.cell(r,c).font=gfont(bold=bold); ws.cell(r,c).alignment=galign()
+        for c in range(1,MC+1): ws.cell(r,c).fill=gfill(GREEN); ws.cell(r,c).font=gfont(bold=bold); ws.cell(r,c).alignment=Alignment(horizontal='left',vertical='center',wrap_text=False)
         ws.cell(r,1).value=text
         ws.merge_cells(start_row=r,start_column=1,end_row=r,end_column=MC)
     h6=[None,'Unit','Resident','Name','KG Approved','KG Pend','Site Pending','Resident','Unit','Resident','Unit','Status','Days','Make','Move','Hold','Notice','Move','Lease','Lease','Lease']
@@ -64,8 +64,10 @@ def fmt_ua(wb_out, raw_bytes, date, prop):
     for c in range(1,MC+1):
         for r,hdr in [(6,h6),(7,h7)]:
             cell=ws.cell(r,c); cell.value=hdr[c-1] if hdr[c-1] is not None else ''
-            cell.font=gfont(bold=True); cell.fill=gfill(GRAY_HDR); cell.alignment=galign('center')
-    for c in range(1,MC+1): ws.cell(7,c).border=Border(bottom=T)
+            cell.font=gfont(bold=True); cell.fill=gfill(GRAY_HDR)
+            cell.alignment=Alignment(horizontal='center',vertical='center',wrap_text=False)
+    # Date cols in UA: N(14)=MakeReady, O(15)=MoveIn, Q(17)=HoldUntil, R(18)=MoveOut, S(19)=LeaseSign, T(20)=LeaseFrom, U(21)=LeaseTo
+    DATE_COLS={14,15,17,18,19,20,21}
     rn=8; blank=False
     for p in V+N+O:
         isVN=p['status'] in ('Vacant','Notice')
@@ -73,7 +75,10 @@ def fmt_ua(wb_out, raw_bytes, date, prop):
             for c in range(1,MC+1): ws.cell(rn,c).fill=gfill(WHITE)
             ws.row_dimensions[rn].height=15.0; rn+=1; blank=True
         def sc(col,val,bg=WHITE,h='left',_rn=rn):
-            cell=ws.cell(_rn,col); cell.value=val; cell.font=gfont(); cell.fill=gfill(bg); cell.alignment=galign(h)
+            cell=ws.cell(_rn,col); cell.value=val; cell.font=gfont(); cell.fill=gfill(bg)
+            cell.alignment=Alignment(horizontal=h,vertical='center',wrap_text=False)
+            if col in DATE_COLS and val is not None:
+                cell.number_format='MM/DD/YY'
         sc(1,p['status']); sc(2,p['unit']); sc(3,p['res_id'] or None)
         sc(4,None if p['status']=='Vacant' else (p['name'] or None))
         sc(5,None,KG_RED if isVN else WHITE); sc(6,None,KG_YEL if isVN else WHITE); sc(7,None,KG_BLUE if isVN else WHITE)
@@ -82,13 +87,14 @@ def fmt_ua(wb_out, raw_bytes, date, prop):
         sc(10,p['res_dep'] if p['res_dep'] is not None else 0,h='right')
         sc(11,p['unit_dep'] if p['unit_dep'] is not None else 0,h='right')
         sc(12,p['yardi_st'] or None); sc(13,p['days'] if p['days'] is not None else None,h='right')
-        sc(14,p['make_rdy'] if p['make_rdy'] is not None else None,h='right')
-        sc(15,p['move_in'] if p['move_in'] is not None else None,h='right')
-        sc(16,p['hold'] or None); sc(17,p['hold_until'] if p['hold_until'] is not None else None)
-        sc(18,p['move_out'] if p['move_out'] is not None else None)
-        sc(19,p['lease_sgn'] if p['lease_sgn'] is not None else None)
-        sc(20,p['lease_from'] if p['lease_from'] is not None else None)
-        sc(21,p['lease_to'] if p['lease_to'] is not None else None)
+        sc(14,p['make_rdy'] if p['make_rdy'] is not None else None,h='center')
+        sc(15,p['move_in'] if p['move_in'] is not None else None,h='center')
+        sc(16,p['hold'] or None)
+        sc(17,p['hold_until'] if p['hold_until'] is not None else None,h='center')
+        sc(18,p['move_out'] if p['move_out'] is not None else None,h='center')
+        sc(19,p['lease_sgn'] if p['lease_sgn'] is not None else None,h='center')
+        sc(20,p['lease_from'] if p['lease_from'] is not None else None,h='center')
+        sc(21,p['lease_to'] if p['lease_to'] is not None else None,h='center')
         ws.row_dimensions[rn].height=15.0; rn+=1
     for col,w in {'A':14.28,'B':11.42,'C':21.42,'D':15,'E':12,'F':10,'G':12,'H':10,'I':11.42,'J':10,'K':10,'L':7.14,'M':11.42,'N':10,'O':10,'P':8,'Q':10,'R':10,'S':10,'T':10,'U':10}.items():
         ws.column_dimensions[col].width=w
@@ -117,17 +123,22 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
     tab=f'{"SUB AR" if is_sub else "Tenant AR"} {date}'
     if tab in wb_out.sheetnames: del wb_out[tab]
     ws=wb_out.create_sheet(tab); MC=13
+    # Title rows 1-3
     for ti in range(3):
-        for c in range(1,MC+1): ws.cell(ti+1,c).fill=gfill(GREEN); ws.cell(ti+1,c).font=gfont(color=tc); ws.cell(ti+1,c).alignment=galign('center')
+        for c in range(1,MC+1):
+            ws.cell(ti+1,c).fill=gfill(GREEN); ws.cell(ti+1,c).font=gfont(color=tc)
+            ws.cell(ti+1,c).alignment=Alignment(horizontal='center',vertical='center',wrap_text=False)
         ws.cell(ti+1,1).value=str(rr[ti][0] if ti<len(rr) and rr[ti] else '')
-    h4=['','','','','Total','','','','','','','',NL]; h5=['','','','','Unpaid','0-30','31-60','61-90','Over 90','','','','']
+    h4=['','','','','Total','','','','','','','',NL]
+    h5=['','','','','Unpaid','0-30','31-60','61-90','Over 90','','','','']
     h6=['Unit','Resident','Status','Name','Charges','days','days','days','days','Prepays','Suspense','Balance',NL]
     bd=bblack()
     for c in range(1,MC+1):
         ra=5<=c<=12
         for ri,hdr in [(4,h4),(5,h5),(6,h6)]:
-            cell=ws.cell(ri,c); cell.value=hdr[c-1]; cell.font=gfont(bold=True); cell.fill=gfill(GRAY_AR); cell.border=bd
-            cell.alignment=galign('right' if ra else ('center' if c==13 else 'left'))
+            cell=ws.cell(ri,c); cell.value=hdr[c-1]; cell.font=gfont(bold=True)
+            cell.fill=gfill(GRAY_AR); cell.border=bd
+            cell.alignment=Alignment(horizontal='right' if ra else ('center' if c==13 else 'left'),vertical='center',wrap_text=False)
     for r in range(1,4): ws.cell(r,13).fill=gfill(GREEN); ws.cell(r,13).font=gfont(color=tc)
     hi=next((i for i,r in enumerate(rr[:10]) if r and any(str(c or '').lower()=='unit' for c in r) and any(str(c or '').lower()=='resident' for c in r)),5)
     ev,cu,no=[],[],[]
@@ -143,7 +154,7 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
         try: return -(float(str(r[4] or 0).replace(',','')))
         except: return 0
     ev.sort(key=sk); cu.sort(key=sk); no.sort(key=sk)
-    rn=7; gb=bgray()
+    rn=7
     for row in ev+cu+no:
         rid=str(row[1] or '').strip(); note=prev_notes.get(rid,'')
         st=str(row[2] or '').strip().lower()
@@ -154,10 +165,15 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
             except: num=None
             isn=5<=c<=12 and num is not None and sv!=''
             cell=ws.cell(rn,c); cell.value=num if isn else (sv or None)
-            cell.font=gfont(color=rc); cell.fill=gfill(WHITE); cell.alignment=galign('right' if c>=5 else 'left'); cell.border=gb
+            cell.font=gfont(color=rc); cell.fill=gfill(WHITE)
+            cell.alignment=Alignment(horizontal='right' if c>=5 else 'left',vertical='center',wrap_text=False)
             if isn: cell.number_format='#,##0.00'
-        nc=ws.cell(rn,13); nc.value=note or None; nc.font=gfont(color=BLACK); nc.fill=gfill(WHITE); nc.alignment=galign('left',wrap=True); nc.border=gb; nc.number_format='@'
+        # Notes col M — no border, no wrap
+        nc=ws.cell(rn,13); nc.value=note or None; nc.font=gfont(color=BLACK)
+        nc.fill=gfill(WHITE); nc.alignment=Alignment(horizontal='left',vertical='center',wrap_text=False)
+        nc.number_format='@'
         rn+=1
+    # Total row — keep borders on total row only
     tb=bblack()
     ws.cell(rn,1).value='Total'; ws.cell(rn,1).font=gfont(bold=True); ws.cell(rn,1).fill=gfill(WHITE); ws.cell(rn,1).border=tb
     for c in range(5,13):
@@ -173,15 +189,19 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
     rr=list(wb_r.active.iter_rows(values_only=True)); wb_r.close()
     tab=f'Rent Roll {date}'
     if tab in wb_out.sheetnames: del wb_out[tab]
-    ws=wb_out.create_sheet(tab); MC=14
+    ws=wb_out.create_sheet(tab); MC=13  # No comments column
     for ti,(text,bold) in enumerate(zip(['Rent Roll',prop,f'As Of = {date}','Month Year'],[True,False,True,False])):
-        for c in range(1,MC+1): ws.cell(ti+1,c).fill=gfill(GREEN); ws.cell(ti+1,c).font=gfont(bold=bold)
+        for c in range(1,MC+1):
+            ws.cell(ti+1,c).fill=gfill(GREEN); ws.cell(ti+1,c).font=gfont(bold=bold)
+            ws.cell(ti+1,c).alignment=Alignment(horizontal='left',vertical='center',wrap_text=False)
         ws.cell(ti+1,1).value=text
-    h5=['Unit','Unit Type','Unit','Resident','Name','Market','Actual','Resident','Other','Move In','Lease','Move Out','Balance','Comments']
-    h6=['\xa0','\xa0','Sq Ft','\xa0','\xa0','Rent','Rent','Deposit','Deposit','\xa0','Expiration','\xa0','\xa0','']
+    h5=['Unit','Unit Type','Unit','Resident','Name','Market','Actual','Resident','Other','Move In','Lease','Move Out','Balance']
+    h6=['\xa0','\xa0','Sq Ft','\xa0','\xa0','Rent','Rent','Deposit','Deposit','\xa0','Expiration','\xa0','\xa0']
     for c in range(1,MC+1):
-        c5=ws.cell(5,c); c5.value=h5[c-1]; c5.font=gfont(bold=True); c5.fill=gfill(GRAY_HDR); c5.alignment=galign('center'); c5.border=Border(bottom=T)
-        c6=ws.cell(6,c); c6.value=h6[c-1]; c6.font=gfont(bold=True); c6.fill=gfill(GRAY_HDR); c6.alignment=galign('center'); c6.border=Border(top=T,bottom=T)
+        c5=ws.cell(5,c); c5.value=h5[c-1]; c5.font=gfont(bold=True); c5.fill=gfill(GRAY_HDR)
+        c5.alignment=Alignment(horizontal='center',vertical='center',wrap_text=False)
+        c6=ws.cell(6,c); c6.value=h6[c-1]; c6.font=gfont(bold=True); c6.fill=gfill(GRAY_HDR)
+        c6.alignment=Alignment(horizontal='center',vertical='center',wrap_text=False)
     hi=next((i for i,r in enumerate(rr[:10]) if r and any(str(c or '').lower()=='unit' for c in r) and any('type' in str(c or '').lower() for c in r)),4)
     V,O=[],[]
     for row in rr[hi+1:]:
@@ -200,21 +220,26 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
             isvac='VACANT' in rname.upper() or not rname
             _fc=fc; _rn=rn
             def sc(col,val,h='left',fmt=None,__rn=_rn,__fc=_fc):
-                cell=ws.cell(__rn,col); cell.value=val; cell.font=gfont(color=__fc); cell.fill=gfill(WHITE); cell.alignment=galign(h)
+                cell=ws.cell(__rn,col); cell.value=val; cell.font=gfont(color=__fc); cell.fill=gfill(WHITE)
+                cell.alignment=Alignment(horizontal=h,vertical='center',wrap_text=False)
                 if fmt: cell.number_format=fmt
             sc(1,unit); sc(2,ut)
-            ws.cell(rn,3).value=sq or 0; ws.cell(rn,3).font=gfont(color=fc); ws.cell(rn,3).fill=gfill(WHITE); ws.cell(rn,3).alignment=galign('right'); ws.cell(rn,3).number_format='#,##0'
+            ws.cell(rn,3).value=sq or 0; ws.cell(rn,3).font=gfont(color=fc); ws.cell(rn,3).fill=gfill(WHITE)
+            ws.cell(rn,3).alignment=Alignment(horizontal='right',vertical='center',wrap_text=False); ws.cell(rn,3).number_format='#,##0'
             sc(4,'VACANT' if isvac else rname); sc(5,'VACANT' if isvac else rname)
             for col,val in [(6,mr),(7,tr),(8,dep)]:
-                ws.cell(rn,col).value=val or 0; ws.cell(rn,col).font=gfont(color=fc); ws.cell(rn,col).fill=gfill(WHITE); ws.cell(rn,col).alignment=galign('right'); ws.cell(rn,col).number_format='#,##0.00'
+                ws.cell(rn,col).value=val or 0; ws.cell(rn,col).font=gfont(color=fc); ws.cell(rn,col).fill=gfill(WHITE)
+                ws.cell(rn,col).alignment=Alignment(horizontal='right',vertical='center',wrap_text=False); ws.cell(rn,col).number_format='#,##0.00'
             sc(9,0,h='right')
+            # Date cols 10=MoveIn, 11=LeaseExpiration, 12=MoveOut — MM/DD/YY format
             for col,dv in [(10,mi),(11,lt),(12,None)]:
-                cell=ws.cell(rn,col); cell.value=dv; cell.font=gfont(color=fc); cell.fill=gfill(WHITE); cell.alignment=galign('center')
-                if isinstance(dv,(int,float)) and dv: cell.number_format='m/d/yyyy'
-            ws.cell(rn,13).value=0; ws.cell(rn,13).font=gfont(color=fc); ws.cell(rn,13).fill=gfill(WHITE); ws.cell(rn,13).alignment=galign('right'); ws.cell(rn,13).number_format='#,##0.00'
-            sc(14,'')
+                cell=ws.cell(rn,col); cell.value=dv; cell.font=gfont(color=fc); cell.fill=gfill(WHITE)
+                cell.alignment=Alignment(horizontal='center',vertical='center',wrap_text=False)
+                if isinstance(dv,(int,float)) and dv: cell.number_format='MM/DD/YY'
+            ws.cell(rn,13).value=0; ws.cell(rn,13).font=gfont(color=fc); ws.cell(rn,13).fill=gfill(WHITE)
+            ws.cell(rn,13).alignment=Alignment(horizontal='right',vertical='center',wrap_text=False); ws.cell(rn,13).number_format='#,##0.00'
             ws.row_dimensions[rn].height=15.0; rn+=1
-    for col,w in {'A':9,'B':12,'C':7,'D':13,'E':22,'F':11,'G':11,'H':11,'I':11,'J':11,'K':13,'L':11,'M':10,'N':49}.items():
+    for col,w in {'A':9,'B':12,'C':7,'D':13,'E':22,'F':11,'G':11,'H':11,'I':11,'J':11,'K':13,'L':11,'M':10}.items():
         ws.column_dimensions[col].width=w
     ws.freeze_panes='A7'
     return ws, len(V), len(O)
@@ -316,16 +341,15 @@ def build_weekly_summary(wb_out, wb_ro, date, ua_ws=None, tar_ws=None, sar_ws=No
     ws.cell(16,4).value='# Physically Occupied and Total Leased Rent'; ws.cell(16,4).font=f9; ws.cell(16,4).alignment=galign('left'); ws.cell(16,4).border=AB
     for c in [5,6,7]: ws.cell(16,c).border=AB; ws.cell(16,c).font=f9
 
-    # Rows 18-20 — AR section
+    # Rows 18-20 — AR section (no $ sign in col B per your real file)
     AR_FMT='_([$$-409]* #,##0.00_);_([$$-409]* \\(#,##0.00\\);_([$$-409]* "-"??_);_(@_)'
     for r,desc in [(18,'Tenant Accounts Receivable (AR)'),(19,'Subsidy Accounts Receivable (AR) '),(20,'Total  AR')]:
         for c in range(2,8): ws.cell(r,c).border=AB; ws.cell(r,c).font=f9
-        ws.cell(r,2).value='$'; ws.cell(r,2).alignment=galign('left')
         if r in [18,19]: ws.cell(r,3).fill=gfill(BLUE_IN)
-        ws.cell(r,3).alignment=galign('center'); ws.cell(r,3).number_format=AR_FMT
-        ws.cell(r,4).value=lbl; ws.cell(r,4).alignment=galign('left')
-        if r in [18,19]: ws.cell(r,5).value=f'=C{r}/C16'; ws.cell(r,5).number_format='0.00%'; ws.cell(r,5).alignment=galign('right')
-        if r==20: ws.cell(r,5).value='=SUM(E18:E19)'; ws.cell(r,5).number_format='0.00%'; ws.cell(r,5).alignment=galign('right')
+        ws.cell(r,3).alignment=Alignment(horizontal='center',vertical='center',wrap_text=False); ws.cell(r,3).number_format=AR_FMT
+        ws.cell(r,4).value=desc; ws.cell(r,4).alignment=Alignment(horizontal='left',vertical='center',wrap_text=False)
+        if r in [18,19]: ws.cell(r,5).value=f'=C{r}/C16'; ws.cell(r,5).number_format='0.00%'; ws.cell(r,5).alignment=Alignment(horizontal='right',vertical='center',wrap_text=False)
+        if r==20: ws.cell(r,5).value='=SUM(E18:E19)'; ws.cell(r,5).number_format='0.00%'; ws.cell(r,5).alignment=Alignment(horizontal='right',vertical='center',wrap_text=False)
 
     ws.cell(20,3).value='=C18+C19'
 
