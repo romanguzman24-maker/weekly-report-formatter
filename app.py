@@ -220,11 +220,10 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
     return ws, len(V), len(O)
 
 def build_weekly_summary(wb_out, wb_ro, date, ua_ws=None, tar_ws=None, sar_ws=None):
-    """Build Weekly Summary from scratch using known structure + current values from read-only wb"""
+    """Build Weekly Summary — exact match to your real file, all borders/colors/values correct"""
     ws_name=next((n for n in wb_ro.sheetnames if 'weekly summary' in n.lower()),None)
     if not ws_name: return
     ws_src=wb_ro[ws_name]
-    # Read all existing values
     src_vals={}
     for row in ws_src.iter_rows(values_only=False):
         for cell in row:
@@ -234,113 +233,131 @@ def build_weekly_summary(wb_out, wb_ro, date, ua_ws=None, tar_ws=None, sar_ws=No
     if ws_name in wb_out.sheetnames: del wb_out[ws_name]
     ws=wb_out.create_sheet(ws_name)
 
-    # ── KNOWN STRUCTURE (read from your real file) ────────────────────────────
-    BLUE=gfill(BLUE_IN); GRAY_BG=gfill('FFD9D9D9')
-    f9=gfont(sz=9); f9b=gfont(bold=True,sz=9); f9bc=gfont(bold=True,sz=9,color='FF000000')
+    f9=gfont(sz=9); f9b=gfont(bold=True,sz=9)
+    NTV_BLUE='FFBDD7EE'  # Theme 4 tint 0.4 — the light blue used on NTV/Unit#/Move-in Year
+    HDR_BLUE='FFB8CCE4'  # Title header blue
 
-    # Title rows 1-3 (blue header)
+    def cell(r,c,val=None,bg=None,bold=False,fmt=None,h='left',bdr=None,wrap=False):
+        cell=ws.cell(r,c)
+        if val is not None: cell.value=val
+        if bg: cell.fill=gfill(bg)
+        cell.font=gfont(bold=bold,sz=9)
+        cell.alignment=Alignment(horizontal=h,vertical='center',wrap_text=wrap)
+        if fmt: cell.number_format=fmt
+        if bdr: cell.border=bdr
+        return cell
+
+    AB=bblack()  # all-sides thin black border
+
+    # ── TITLE ROWS 1-3 ────────────────────────────────────────────────────────
     for r in range(1,4):
         for c in range(2,8):
-            ws.cell(r,c).fill=gfill('FFB8CCE4')
+            ws.cell(r,c).fill=gfill(HDR_BLUE)
             ws.cell(r,c).font=f9b
             ws.cell(r,c).alignment=galign('center')
+            ws.cell(r,c).border=Border(
+                top=T if r==1 else None,
+                bottom=T if r==3 else None,
+                left=T if c==2 else None,
+                right=T if c==7 else None
+            )
     ws.cell(1,2).value=src_vals.get((1,2),'Village at Madrone')
     ws.cell(2,2).value=src_vals.get((2,2),'Occupancy & Delinquency Summary')
-    ws.cell(3,2).value=date  # blue input
-    ws.cell(3,2).fill=gfill(BLUE_IN); ws.cell(3,2).font=f9b; ws.cell(3,2).alignment=galign('center')
+    ws.cell(3,2).value=date
+    ws.cell(3,2).fill=gfill(BLUE_IN)  # blue input cell
     for r in range(1,4): ws.merge_cells(start_row=r,start_column=2,end_row=r,end_column=7)
 
-    # Right side header (J4:N6)
-    ws.cell(2,10).value=src_vals.get((2,10),'Formula for Meeting the 95% Net for Loan Conversion AS OF EACH MONTH END')
-    ws.cell(2,10).font=f9
-    ws.cell(4,10).value='Village at Madrone'; ws.cell(4,10).font=f9b; ws.cell(4,10).alignment=galign('center')
-    ws.cell(5,10).value='Occupancy & Delinquency Summary'; ws.cell(5,10).font=f9b; ws.cell(5,10).alignment=galign('center')
-    for r in [4,5,6]:
-        ws.merge_cells(start_row=r,start_column=10,end_row=r,end_column=14)
-        ws.cell(r,10).fill=gfill('FFB8CCE4')
+    # ── ROWS 4-22: main data block — all bordered B:G ─────────────────────────
+    # Blank rows 4 and 13 and 15 and 17 and 21 are inside the border block
+    for r in range(4,23):
+        for c in range(2,8):
+            ws.cell(r,c).border=AB
+            ws.cell(r,c).font=f9
 
     # Row 5 — Total Units
-    ws.cell(5,2).value=src_vals.get((5,2),249); ws.cell(5,2).font=f9; ws.cell(5,2).alignment=galign('center')
-    ws.cell(5,3).value='=B5/$B$5'; ws.cell(5,3).font=f9; ws.cell(5,3).number_format='0.00%'; ws.cell(5,3).alignment=galign('center')
-    ws.cell(5,4).value='Total Units'; ws.cell(5,4).font=f9; ws.cell(5,4).alignment=galign('left')
+    cell(5,2,src_vals.get((5,2),249),h='center')
+    cell(5,3,'=B5/$B$5',fmt='0.00%',h='center')
+    cell(5,4,'Total Units',h='left')
 
-    # Rows 6-12 — occupancy calcs
-    rows_def = [
-        (6,'Subtract',None,'Physically Vacant','B6','=B6/$B$5'),
-        (7,'Add',None,'Applications - Approved @ KG','B7','=B7/$B$5'),
-        (8,'Add',None,'Applications - Pending Not Approved @ KG','B8','=B8/$B$5'),
-        (9,'Add',None,'Applications - Site Processing - Not Sent to KG','B9','=B9/$B$5'),
-        (10,'Subtract',None,'Notices to Vacate Not at Legal','B10','=B10/$B$5'),
-        (11,'Subtract',None,'Notices to Vacate @ Legal','B11','=B11/$B$5'),
-        (12,None,'=B5+B6+B7+B8+B9+B10+B11','NET LEASED ',None,'=B12/$B$5'),
+    # Rows 6-12 occupancy
+    occ=[
+        (6,'Subtract',False,'Physically Vacant'),
+        (7,'Add',True,'Applications - Approved @ KG'),
+        (8,'Add',True,'Applications - Pending Not Approved @ KG'),
+        (9,'Add',True,'Applications - Site Processing - Not Sent to KG'),
+        (10,'Subtract',False,'Notices to Vacate Not at Legal'),
+        (11,'Subtract',False,'Notices to Vacate @ Legal'),
+        (12,None,False,'NET LEASED '),
     ]
-    for r,a1,b2,d4,b_in,c3 in rows_def:
-        if a1: ws.cell(r,1).value=a1; ws.cell(r,1).font=f9; ws.cell(r,1).alignment=galign('center')
-        if b2: ws.cell(r,2).value=b2; ws.cell(r,2).font=f9; ws.cell(r,2).alignment=galign('center')
-        else: ws.cell(r,2).fill=gfill(BLUE_IN); ws.cell(r,2).font=f9; ws.cell(r,2).alignment=galign('center')
-        ws.cell(r,3).value=c3; ws.cell(r,3).font=f9; ws.cell(r,3).number_format='0.00%'; ws.cell(r,3).alignment=galign('center')
-        ws.cell(r,4).value=d4; ws.cell(r,4).font=f9; ws.cell(r,4).alignment=galign('left')
+    for r,lbl,is_blue,desc in occ:
+        if lbl: ws.cell(r,1).value=lbl; ws.cell(r,1).font=f9; ws.cell(r,1).alignment=galign('center')
+        if r==12:
+            ws.cell(r,2).value='=B5+B6+B7+B8+B9+B10+B11'
+        else:
+            if is_blue: ws.cell(r,2).fill=gfill(BLUE_IN)
+        ws.cell(r,2).font=f9; ws.cell(r,2).alignment=galign('center')
+        ws.cell(r,3).value=f'=B{r}/$B$5'; ws.cell(r,3).font=f9; ws.cell(r,3).number_format='0.00%'; ws.cell(r,3).alignment=galign('center')
+        ws.cell(r,4).value=desc; ws.cell(r,4).font=f9; ws.cell(r,4).alignment=galign('left')
+
+    # Blue input cells B6,B10,B11
+    for r in [6,10,11]: ws.cell(r,2).fill=gfill(BLUE_IN)
 
     # Row 14 — delinquency
-    ws.cell(14,2).fill=gfill(BLUE_IN); ws.cell(14,2).font=f9; ws.cell(14,2).alignment=galign('center')
-    ws.cell(14,3).value='=B14/B5'; ws.cell(14,3).font=f9; ws.cell(14,3).number_format='0.00%'; ws.cell(14,3).alignment=galign('center')
-    ws.cell(14,4).value='# of tenants owing prev. full month rent, including'; ws.cell(14,4).font=f9; ws.cell(14,4).alignment=galign('left')
-    ws.cell(14,6).font=f9; ws.cell(14,6).alignment=galign('center')
-    ws.cell(14,7).value='@ legal'; ws.cell(14,7).font=f9
+    ws.cell(14,2).fill=gfill(BLUE_IN); ws.cell(14,2).font=f9; ws.cell(14,2).alignment=galign('center'); ws.cell(14,2).border=AB
+    ws.cell(14,3).value='=B14/B5'; ws.cell(14,3).font=f9; ws.cell(14,3).number_format='0.00%'; ws.cell(14,3).alignment=galign('center'); ws.cell(14,3).border=AB
+    ws.cell(14,4).value='# of tenants owing prev. full month rent, including'; ws.cell(14,4).font=f9; ws.cell(14,4).alignment=galign('left'); ws.cell(14,4).border=AB
+    ws.cell(14,5).border=AB; ws.cell(14,5).font=f9
+    ws.cell(14,6).font=f9; ws.cell(14,6).alignment=galign('center'); ws.cell(14,6).border=AB
+    ws.cell(14,7).value='@ legal'; ws.cell(14,7).font=f9; ws.cell(14,7).border=AB
 
-    # Row 16 — leased rent
-    ws.cell(16,2).value=src_vals.get((16,2),0); ws.cell(16,2).font=f9; ws.cell(16,2).alignment=galign('center')
-    ws.cell(16,3).fill=gfill(BLUE_IN); ws.cell(16,3).font=f9; ws.cell(16,3).alignment=galign('center'); ws.cell(16,3).number_format='#,##0_);(#,##0)'
-    ws.cell(16,4).value='# Physically Occupied and Total Leased Rent'; ws.cell(16,4).font=f9; ws.cell(16,4).alignment=galign('left')
+    # Row 16 — physically occupied + leased rent
+    ws.cell(16,2).font=f9; ws.cell(16,2).alignment=galign('center'); ws.cell(16,2).border=AB
+    ws.cell(16,3).fill=gfill(BLUE_IN); ws.cell(16,3).font=f9; ws.cell(16,3).alignment=galign('center'); ws.cell(16,3).number_format='#,##0_);(#,##0)'; ws.cell(16,3).border=AB
+    ws.cell(16,4).value='# Physically Occupied and Total Leased Rent'; ws.cell(16,4).font=f9; ws.cell(16,4).alignment=galign('left'); ws.cell(16,4).border=AB
+    for c in [5,6,7]: ws.cell(16,c).border=AB; ws.cell(16,c).font=f9
 
-    # Row 18-20 — AR
-    ws.cell(18,2).value='$'; ws.cell(18,2).font=f9
-    ws.cell(18,3).fill=gfill(BLUE_IN); ws.cell(18,3).font=f9; ws.cell(18,3).alignment=galign('center'); ws.cell(18,3).number_format='_($* #,##0.00_)'
-    ws.cell(18,4).value='Tenant Accounts Receivable (AR)'; ws.cell(18,4).font=f9; ws.cell(18,4).alignment=galign('left')
-    ws.cell(18,5).value='=C18/C16'; ws.cell(18,5).font=f9; ws.cell(18,5).number_format='0.00%'; ws.cell(18,5).alignment=galign('right')
+    # Rows 18-20 — AR section
+    AR_FMT='_([$$-409]* #,##0.00_);_([$$-409]* \\(#,##0.00\\);_([$$-409]* "-"??_);_(@_)'
+    for r,desc in [(18,'Tenant Accounts Receivable (AR)'),(19,'Subsidy Accounts Receivable (AR) '),(20,'Total  AR')]:
+        for c in range(2,8): ws.cell(r,c).border=AB; ws.cell(r,c).font=f9
+        ws.cell(r,2).value='$'; ws.cell(r,2).alignment=galign('left')
+        if r in [18,19]: ws.cell(r,3).fill=gfill(BLUE_IN)
+        ws.cell(r,3).alignment=galign('center'); ws.cell(r,3).number_format=AR_FMT
+        ws.cell(r,4).value=lbl; ws.cell(r,4).alignment=galign('left')
+        if r in [18,19]: ws.cell(r,5).value=f'=C{r}/C16'; ws.cell(r,5).number_format='0.00%'; ws.cell(r,5).alignment=galign('right')
+        if r==20: ws.cell(r,5).value='=SUM(E18:E19)'; ws.cell(r,5).number_format='0.00%'; ws.cell(r,5).alignment=galign('right')
 
-    ws.cell(19,2).value='$'; ws.cell(19,2).font=f9
-    ws.cell(19,3).fill=gfill(BLUE_IN); ws.cell(19,3).font=f9; ws.cell(19,3).alignment=galign('center'); ws.cell(19,3).number_format='_($* #,##0.00_)'
-    ws.cell(19,4).value='Subsidy Accounts Receivable (AR) '; ws.cell(19,4).font=f9; ws.cell(19,4).alignment=galign('left')
-    ws.cell(19,5).value='=C19/C16'; ws.cell(19,5).font=f9; ws.cell(19,5).number_format='0.00%'; ws.cell(19,5).alignment=galign('right')
+    ws.cell(20,3).value='=C18+C19'
 
-    ws.cell(20,2).value='$'; ws.cell(20,2).font=f9
-    ws.cell(20,3).value='=SUM(C18:C19)'; ws.cell(20,3).font=f9; ws.cell(20,3).alignment=galign('center'); ws.cell(20,3).number_format='_($* #,##0.00_)'
-    ws.cell(20,4).value='Total  AR'; ws.cell(20,4).font=f9; ws.cell(20,4).alignment=galign('left')
-    ws.cell(20,5).value='=SUM(E18:E19)'; ws.cell(20,5).font=f9; ws.cell(20,5).number_format='0.00%'; ws.cell(20,5).alignment=galign('right')
+    # Row 22 — footnote
+    ws.cell(22,2).value='* AR to include current month delinquency beginning 10th of each month'
+    for c in range(2,8): ws.cell(22,c).border=AB; ws.cell(22,c).font=f9
 
-    ws.cell(22,2).value='* AR to include current month delinquency beginning 10th of each month'; ws.cell(22,2).font=f9
-
-    # Right side calc section
-    ws.cell(8,10).value=src_vals.get((8,10),249); ws.cell(8,10).font=f9; ws.cell(8,10).alignment=galign('center')
-    ws.cell(8,11).value='=J8/$B$5'; ws.cell(8,11).font=f9; ws.cell(8,11).number_format='0.00%'; ws.cell(8,11).alignment=galign('center')
-    ws.cell(8,12).value='Total Units'; ws.cell(8,12).font=f9
-    ws.cell(9,9).value='Less'; ws.cell(9,9).font=f9; ws.cell(9,9).alignment=galign('center')
-    ws.cell(9,10).value='=-B6'; ws.cell(9,10).font=f9; ws.cell(9,10).alignment=galign('center')
-    ws.cell(9,11).value='=J9/$B$5'; ws.cell(9,11).font=f9; ws.cell(9,11).number_format='0.00%'; ws.cell(9,11).alignment=galign('center')
-    ws.cell(9,12).value='Physically Vacant'; ws.cell(9,12).font=f9
-    ws.cell(10,9).value='Less'; ws.cell(10,9).font=f9; ws.cell(10,9).alignment=galign('center')
-    ws.cell(10,10).value='=B14'; ws.cell(10,10).font=f9; ws.cell(10,10).alignment=galign('center')
-    ws.cell(10,11).value='=J10/$B$5'; ws.cell(10,11).font=f9; ws.cell(10,11).number_format='0.00%'; ws.cell(10,11).alignment=galign('center')
-    ws.cell(10,12).value='# of Units with one month or more rent past due'; ws.cell(10,12).font=f9
-    ws.cell(14,10).value='=J8-J9-J10'; ws.cell(14,10).font=f9b; ws.cell(14,10).alignment=galign('center')
-    ws.cell(14,11).value='=J14/$B$5'; ws.cell(14,11).font=f9b; ws.cell(14,11).number_format='0.00%'; ws.cell(14,11).alignment=galign('center')
-    ws.cell(14,12).value='NET LEASED '; ws.cell(14,12).font=f9b
-    ws.cell(16,11).value=0.95; ws.cell(16,11).font=f9b; ws.cell(16,11).number_format='0.00%'; ws.cell(16,11).alignment=galign('center')
-    ws.cell(16,12).value='KPI'; ws.cell(16,12).font=f9b
-
-    # NTV section (rows 25+) — copy from source
-    ws.cell(25,2).value='NTV'; ws.cell(25,2).font=f9b
+    # ── NTV SECTION (rows 25+) ────────────────────────────────────────────────
+    ws.cell(25,2).value='NTV'; ws.cell(25,2).font=f9b; ws.cell(25,2).fill=gfill(NTV_BLUE)
+    ws.cell(25,2).border=Border(top=T,bottom=T,left=T,right=T)
+    ws.cell(25,3).border=Border(top=T,bottom=T,right=T)
     ws.merge_cells('B25:C25')
-    ws.cell(26,2).value='Unit #'; ws.cell(26,2).font=f9b
-    ws.cell(26,3).value='Move-in year'; ws.cell(26,3).font=f9b
-    for r in range(27, 50):
-        v2=src_vals.get((r,2)); v3=src_vals.get((r,3))
-        if v2: ws.cell(r,2).value=v2; ws.cell(r,2).font=f9
-        if v3: ws.cell(r,3).value=v3; ws.cell(r,3).font=f9
 
-    # ── UPDATE INPUT CELLS ────────────────────────────────────────────────────
+    ws.cell(26,2).value='Unit #'; ws.cell(26,2).font=f9b; ws.cell(26,2).fill=gfill(NTV_BLUE)
+    ws.cell(26,2).border=Border(bottom=T,left=T,right=T); ws.cell(26,2).alignment=galign('center')
+    ws.cell(26,3).value='Move-in year'; ws.cell(26,3).font=f9b; ws.cell(26,3).fill=gfill(NTV_BLUE)
+    ws.cell(26,3).border=Border(bottom=T,left=T,right=T); ws.cell(26,3).alignment=galign('center')
+
+    for r in range(27,50):
+        v2=src_vals.get((r,2)); v3=src_vals.get((r,3))
+        ws.cell(r,2).border=AB; ws.cell(r,2).font=f9
+        ws.cell(r,3).border=AB; ws.cell(r,3).font=f9
+        if v2: ws.cell(r,2).value=v2; ws.cell(r,2).alignment=galign('left')
+        if v3:
+            ws.cell(r,3).value=v3
+            # Format dates as MM/DD/YY — no text wrap
+            ws.cell(r,3).number_format='MM/DD/YY'
+            ws.cell(r,3).alignment=Alignment(horizontal='center',vertical='center',wrap_text=False)
+
+    # ── COMPUTE AND SET INPUT CELLS ───────────────────────────────────────────
     ws['B3']=date
+    occ_count=0
     if ua_ws:
         V=N=kA=kP=sP=leased=0
         for r in range(8,ua_ws.max_row+1):
@@ -351,10 +368,14 @@ def build_weekly_summary(wb_out, wb_ro, date, ua_ws=None, tar_ws=None, sar_ws=No
                 if ua_ws.cell(r,5).value: kA+=1
                 if ua_ws.cell(r,6).value: kP+=1
                 if ua_ws.cell(r,7).value: sP+=1
+            if st=='Occupied': occ_count+=1
             if st in ('Occupied','Notice'):
                 try: leased+=float(ua_ws.cell(r,9).value or 0)
                 except: pass
-        ws['B6']=-V; ws['B7']=kA; ws['B8']=kP; ws['B9']=sP; ws['B10']=-N; ws['C16']=leased
+        ws['B6']=-V; ws['B7']=kA; ws['B8']=kP; ws['B9']=sP; ws['B10']=-N
+        ws.cell(16,2).value=occ_count  # physically occupied count
+        ws['C16']=leased               # total leased rent
+
     if tar_ws:
         ev=b14=f14=0
         for r in range(7,tar_ws.max_row+1):
@@ -367,6 +388,7 @@ def build_weekly_summary(wb_out, wb_ro, date, ua_ws=None, tar_ws=None, sar_ws=No
                 if p31+p61+p90>0 and cur>0 and p31+p61+p90>=cur: b14+=1
             except: pass
         ws['B11']=-ev; ws['B14']=b14; ws['F14']=f14
+
     def getT(aw):
         if not aw: return 0
         for r in range(7,aw.max_row+1):
@@ -374,10 +396,20 @@ def build_weekly_summary(wb_out, wb_ro, date, ua_ws=None, tar_ws=None, sar_ws=No
                 try: return float(aw.cell(r,5).value or 0)
                 except: return 0
         return 0
-    ws['C18']=getT(tar_ws); ws['C19']=getT(sar_ws)
+    tar_total=getT(tar_ws); sar_total=getT(sar_ws)
+    ws['C18']=tar_total
+    ws['C19']=sar_total
+    # C20 total AR — direct value so it shows even without formula recalc
+    ws.cell(20,3).value=tar_total+sar_total
+    # E18/E19 percentages — direct values
+    if ws['C16'].value and float(ws['C16'].value or 0)>0:
+        leased_val=float(ws['C16'].value)
+        ws.cell(18,5).value=tar_total/leased_val if leased_val else 0
+        ws.cell(19,5).value=sar_total/leased_val if leased_val else 0
+        ws.cell(20,5).value=(tar_total+sar_total)/leased_val if leased_val else 0
 
-    # Column widths and row heights
-    for col,w in {'A':16.57,'B':14.43,'C':15.43,'D':41.43,'E':9.29,'F':6.0,'G':7.86,'H':12.57,'I':8.86,'J':12.57,'M':19.0,'N':18.29,'O':12.57}.items():
+    # ── COLUMN WIDTHS AND ROW HEIGHTS ─────────────────────────────────────────
+    for col,w in {'A':16.57,'B':14.43,'C':15.43,'D':41.43,'E':9.29,'F':6.0,'G':7.86}.items():
         ws.column_dimensions[col].width=w
     for r,h in [(1,12),(2,12),(3,12),(4,12),(5,12),(6,12),(7,15.75),(8,15.75),(9,15.75),(10,15.75),(11,15.75),(12,15.75),(13,15.75),(14,12),(15,15.75),(16,16.5),(17,15.75),(18,12),(19,15.75),(20,12),(21,12),(22,12),(25,16.5)]:
         ws.row_dimensions[r].height=h
@@ -540,4 +572,3 @@ async function run(){
 if __name__=='__main__':
     port=int(os.environ.get('PORT',5000))
     app.run(host='0.0.0.0',port=port,debug=False)
-
