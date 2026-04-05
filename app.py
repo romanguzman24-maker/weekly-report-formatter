@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter — Flask Web App"""
-from flask import Flask, request, send_file, render_template_string
+"""Weekly Report Formatter v8 — Production"""
+from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from copy import copy
-import io, re, os
+import io, re, os, traceback
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
@@ -43,7 +43,7 @@ def parse_ua(ws):
     return out
 
 def fmt_ua(wb_out, raw_bytes, date, prop):
-    wb_r=openpyxl.load_workbook(io.BytesIO(raw_bytes),data_only=True)
+    wb_r=openpyxl.load_workbook(io.BytesIO(raw_bytes),data_only=True,keep_vba=False)
     data=parse_ua(wb_r.active)
     V=[r for r in data if r['status']=='Vacant']
     N=[r for r in data if r['status']=='Notice']
@@ -55,7 +55,8 @@ def fmt_ua(wb_out, raw_bytes, date, prop):
         ['Unit Availability Details ',prop,f'As Of: {date}','Showing Pre-Leased: Yes','Showing Occupied: Yes'],
         [True,False,True,False,False])):
         r=ti+1
-        for c in range(1,MC+1): ws.cell(r,c).fill=gfill(GREEN); ws.cell(r,c).font=gfont(bold=bold); ws.cell(r,c).alignment=galign()
+        for c in range(1,MC+1):
+            ws.cell(r,c).fill=gfill(GREEN); ws.cell(r,c).font=gfont(bold=bold); ws.cell(r,c).alignment=galign()
         ws.cell(r,1).value=text
         ws.merge_cells(start_row=r,start_column=1,end_row=r,end_column=MC)
     h6=[None,'Unit','Resident','Name','KG Approved','KG Pend','Site Pending','Resident','Unit','Resident','Unit','Status','Days','Make','Move','Hold','Notice','Move','Lease','Lease','Lease']
@@ -80,12 +81,10 @@ def fmt_ua(wb_out, raw_bytes, date, prop):
         sc(9,p['unit_rent'] if p['unit_rent'] is not None else 0,h='right')
         sc(10,p['res_dep'] if p['res_dep'] is not None else 0,h='right')
         sc(11,p['unit_dep'] if p['unit_dep'] is not None else 0,h='right')
-        sc(12,p['yardi_st'] or None)
-        sc(13,p['days'] if p['days'] is not None else None,h='right')
+        sc(12,p['yardi_st'] or None); sc(13,p['days'] if p['days'] is not None else None,h='right')
         sc(14,p['make_rdy'] if p['make_rdy'] is not None else None,h='right')
         sc(15,p['move_in'] if p['move_in'] is not None else None,h='right')
-        sc(16,p['hold'] or None)
-        sc(17,p['hold_until'] if p['hold_until'] is not None else None)
+        sc(16,p['hold'] or None); sc(17,p['hold_until'] if p['hold_until'] is not None else None)
         sc(18,p['move_out'] if p['move_out'] is not None else None)
         sc(19,p['lease_sgn'] if p['lease_sgn'] is not None else None)
         sc(20,p['lease_from'] if p['lease_from'] is not None else None)
@@ -107,12 +106,12 @@ def get_notes(wb, prefix):
     if hi==-1: return notes
     hdr=rows[hi]; ri=next((i for i,c in enumerate(hdr) if str(c or '').lower()=='resident'),-1); ni=len(hdr)-1
     for row in rows[hi+1:]:
-        id=str(row[ri] or '').strip() if ri>=0 else ''; note=str(row[ni] or '').strip() if len(row)>ni else ''
-        if id and note: notes[id]=note
+        id_=str(row[ri] or '').strip() if ri>=0 else ''; note=str(row[ni] or '').strip() if len(row)>ni else ''
+        if id_ and note: notes[id_]=note
     return notes
 
 def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
-    rr=list(openpyxl.load_workbook(io.BytesIO(raw_bytes),data_only=True).active.iter_rows(values_only=True))
+    rr=list(openpyxl.load_workbook(io.BytesIO(raw_bytes),data_only=True,keep_vba=False).active.iter_rows(values_only=True))
     NL='Comments' if is_sub else 'Delinquency notes'; tc=BLACK if is_sub else DARKGRAY
     tab=f'{"SUB AR" if is_sub else "Tenant AR"} {date}'
     if tab in wb_out.sheetnames: del wb_out[tab]
@@ -169,7 +168,7 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
     return ws, len(ev), len(cu), len(no)
 
 def fmt_rr(wb_out, raw_bytes, date, prop):
-    rr=list(openpyxl.load_workbook(io.BytesIO(raw_bytes),data_only=True).active.iter_rows(values_only=True))
+    rr=list(openpyxl.load_workbook(io.BytesIO(raw_bytes),data_only=True,keep_vba=False).active.iter_rows(values_only=True))
     tab=f'Rent Roll {date}'
     if tab in wb_out.sheetnames: del wb_out[tab]
     ws=wb_out.create_sheet(tab); MC=14
@@ -187,8 +186,8 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         if not row or all(c is None or c=='' for c in row): continue
         unit=str(row[1] or '').strip()
         if not re.match(r'^\d{2}-\d{3}',unit): continue
-        rn=str(row[3] or '').strip().upper()
-        if 'VACANT' in rn or not rn: V.append(row)
+        rname=str(row[3] or '').strip().upper()
+        if 'VACANT' in rname or not rname: V.append(row)
         else: O.append(row)
     V.sort(key=lambda r:str(r[1] or '')); O.sort(key=lambda r:str(r[1] or ''))
     rn=7
@@ -233,7 +232,6 @@ def copy_ws(wb_src, wb_out, date, ua_ws=None, tar_ws=None, sar_ws=None):
     for m in ws_s.merged_cells.ranges: ws.merge_cells(str(m))
     for col in ws_s.column_dimensions: ws.column_dimensions[col].width=ws_s.column_dimensions[col].width
     for r in ws_s.row_dimensions: ws.row_dimensions[r].height=ws_s.row_dimensions[r].height
-    ws[ws_name.strip()+'!B3'] if False else None  # no-op
     ws['B3']=date
     if ua_ws:
         V=N=kA=kP=sP=leased=0
@@ -245,7 +243,9 @@ def copy_ws(wb_src, wb_out, date, ua_ws=None, tar_ws=None, sar_ws=None):
                 if ua_ws.cell(r,5).value: kA+=1
                 if ua_ws.cell(r,6).value: kP+=1
                 if ua_ws.cell(r,7).value: sP+=1
-            if st in ('Occupied','Notice'): leased+=float(ua_ws.cell(r,9).value or 0)
+            if st in ('Occupied','Notice'):
+                try: leased+=float(ua_ws.cell(r,9).value or 0)
+                except: pass
         ws['B6']=-V; ws['B7']=kA; ws['B8']=kP; ws['B9']=sP; ws['B10']=-N; ws['C16']=leased
     if tar_ws:
         ev=b14=f14=0
@@ -254,7 +254,8 @@ def copy_ws(wb_src, wb_out, date, ua_ws=None, tar_ws=None, sar_ws=None):
             st=str(tar_ws.cell(r,3).value or '').strip().lower()
             if st in ('eviction','past'): ev+=1; f14+=1
             try:
-                p31=float(tar_ws.cell(r,7).value or 0); p61=float(tar_ws.cell(r,8).value or 0); p90=float(tar_ws.cell(r,9).value or 0); cur=float(tar_ws.cell(r,6).value or 0)
+                p31=float(tar_ws.cell(r,7).value or 0); p61=float(tar_ws.cell(r,8).value or 0)
+                p90=float(tar_ws.cell(r,9).value or 0); cur=float(tar_ws.cell(r,6).value or 0)
                 if p31+p61+p90>0 and cur>0 and p31+p61+p90>=cur: b14+=1
             except: pass
         ws['B11']=-ev; ws['B14']=b14; ws['F14']=f14
@@ -267,11 +268,48 @@ def copy_ws(wb_src, wb_out, date, ua_ws=None, tar_ws=None, sar_ws=None):
         return 0
     ws['C18']=getT(tar_ws); ws['C19']=getT(sar_ws)
 
-HTML = open(os.path.join(os.path.dirname(__file__), 'index.html')).read() if os.path.exists(os.path.join(os.path.dirname(__file__), 'index.html')) else None
+@app.route('/health')
+def health():
+    return jsonify({'status':'ok','version':'8.0'})
 
 @app.route('/')
 def index():
-    return render_template_string('''<!DOCTYPE html>
+    return render_template_string(PAGE)
+
+@app.route('/format', methods=['POST'])
+def format_report():
+    try:
+        date=request.form.get('date','').strip()
+        prop=request.form.get('prop','').strip()
+        if not date or not prop:
+            return jsonify({'error':'Missing date or property'}),400
+        wb_file=request.files.get('wb')
+        if not wb_file:
+            return jsonify({'error':'Working workbook is required'}),400
+        wb_src=openpyxl.load_workbook(io.BytesIO(wb_file.read()),data_only=True,keep_vba=False)
+        pTAR=get_notes(wb_src,'Tenant AR')
+        pSAR=get_notes(wb_src,'Sub AR')
+        pSAR.update(get_notes(wb_src,'SUB AR'))
+        wb_out=openpyxl.Workbook(); wb_out.remove(wb_out.active)
+        ua_ws=tar_ws=sar_ws=None
+        ua_f=request.files.get('ua')
+        if ua_f: ua_ws,*_=fmt_ua(wb_out,ua_f.read(),date,prop)
+        tar_f=request.files.get('tar')
+        if tar_f: tar_ws,*_=fmt_ar(wb_out,tar_f.read(),date,pTAR,False)
+        sar_f=request.files.get('sar')
+        if sar_f: sar_ws,*_=fmt_ar(wb_out,sar_f.read(),date,pSAR,True)
+        rr_f=request.files.get('rr')
+        if rr_f: fmt_rr(wb_out,rr_f.read(),date,prop)
+        copy_ws(wb_src,wb_out,date,ua_ws,tar_ws,sar_ws)
+        out=io.BytesIO(); wb_out.save(out); out.seek(0)
+        prefix=prop.split('(')[0].strip().replace(' ','_')
+        fname=f'{prefix}_Weekly_{date.replace(".","")}_Formatted.xlsx'
+        return send_file(out,mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',as_attachment=True,download_name=fname)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error':str(e)}),500
+
+PAGE='''<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Weekly Report Formatter</title>
 <style>
@@ -322,103 +360,67 @@ select:focus,input:focus{border-color:var(--g);}
 <div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v8.0</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
-    <select id="prop" style="width:100%;margin-bottom:10px;">
-      <option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option>
-      <option value="Village at First">Village at First</option>
-      <option value="Village at Santa Teresa">Village at Santa Teresa</option>
-    </select>
-    <div style="display:flex;align-items:center;gap:10px;">
-      <input type="text" id="date" placeholder="04.06.26" maxlength="8" style="width:120px;"/>
-      <span style="font-size:11px;color:var(--mut);font-family:\'DM Mono\',monospace;">MM.DD.YY</span>
-    </div>
+    <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
+    <div style="display:flex;align-items:center;gap:10px;"><input type="text" id="date" placeholder="04.06.26" maxlength="8" style="width:120px;"/><span style="font-size:11px;color:var(--mut);font-family:\'DM Mono\',monospace;">MM.DD.YY</span></div>
   </div>
-  <div class="card"><div class="sn">STEP 02</div><div class="ct">Upload Working Workbook</div><div class="cd">Master workbook with Weekly Summary and prior AR history.</div>
+  <div class="card"><div class="sn">STEP 02</div><div class="ct">Upload Working Workbook</div><div class="cd">The master workbook with Weekly Summary and prior AR history.</div>
+    <div class="grid"><div class="slot full" id="s-wb"><input type="file" id="f-wb" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#8CB5F9;"></div><span class="sl">&#128210; Weekly Workbook</span></div><div class="ss">Master file — Weekly Summary + history</div><div class="sn2" id="n-wb">Click or drag file here</div></div></div>
+  </div>
+  <div class="card"><div class="sn">STEP 03</div><div class="ct">Upload Yardi Exports</div><div class="cd">Upload each Yardi export. Leave empty anything you don\'t have — it will be skipped.</div>
     <div class="grid">
-      <div class="slot full" id="s-wb"><input type="file" name="wb" id="f-wb" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#8CB5F9;"></div><span class="sl">&#128210; Weekly Workbook</span></div><div class="ss">Master file — Weekly Summary + history</div><div class="sn2" id="n-wb">Click or drag file here</div></div>
+      <div class="slot" id="s-ua"><input type="file" id="f-ua" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#7AD694;"></div><span class="sl">Unit Availability</span></div><div class="ss">Onsite &rarr; Analytics &rarr; Unit Availability Details</div><div class="sn2" id="n-ua">Click or drag file here</div></div>
+      <div class="slot" id="s-tar"><input type="file" id="f-tar" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#F28E86;"></div><span class="sl">Tenant AR</span></div><div class="ss">Analytics &rarr; Receivable Aging (Excl. HUD)</div><div class="sn2" id="n-tar">Click or drag file here</div></div>
+      <div class="slot" id="s-sar"><input type="file" id="f-sar" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#8CB5F9;"></div><span class="sl">Subsidy AR</span></div><div class="ss">Analytics &rarr; Receivable Aging (HUD Only)</div><div class="sn2" id="n-sar">Click or drag file here</div></div>
+      <div class="slot" id="s-rr"><input type="file" id="f-rr" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#C4A0F5;"></div><span class="sl">Rent Roll</span></div><div class="ss">Onsite &rarr; Analytics &rarr; Rent Roll</div><div class="sn2" id="n-rr">Click or drag file here</div></div>
     </div>
   </div>
-  <div class="card"><div class="sn">STEP 03</div><div class="ct">Upload Yardi Exports</div><div class="cd">Upload each Yardi export. Leave empty anything you don\'t have this week — it will be skipped.</div>
-    <div class="grid">
-      <div class="slot" id="s-ua"><input type="file" name="ua" id="f-ua" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#7AD694;"></div><span class="sl">Unit Availability</span></div><div class="ss">Onsite &rarr; Analytics &rarr; Unit Availability Details</div><div class="sn2" id="n-ua">Click or drag file here</div></div>
-      <div class="slot" id="s-tar"><input type="file" name="tar" id="f-tar" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#F28E86;"></div><span class="sl">Tenant AR</span></div><div class="ss">Analytics &rarr; Receivable Aging (Excl. HUD)</div><div class="sn2" id="n-tar">Click or drag file here</div></div>
-      <div class="slot" id="s-sar"><input type="file" name="sar" id="f-sar" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#8CB5F9;"></div><span class="sl">Subsidy AR</span></div><div class="ss">Analytics &rarr; Receivable Aging (HUD Only)</div><div class="sn2" id="n-sar">Click or drag file here</div></div>
-      <div class="slot" id="s-rr"><input type="file" name="rr" id="f-rr" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#C4A0F5;"></div><span class="sl">Rent Roll</span></div><div class="ss">Onsite &rarr; Analytics &rarr; Rent Roll</div><div class="sn2" id="n-rr">Click or drag file here</div></div>
-    </div>
-  </div>
-  <div class="card"><div class="sn">STEP 04</div><div class="ct">Format &amp; Download</div><div class="cd">Formats all reports with exact colors, structure, and formulas. Downloads the final workbook ready for Jacore.</div>
+  <div class="card"><div class="sn">STEP 04</div><div class="ct">Format &amp; Download</div><div class="cd">Formats all reports with exact colors, structure, and formulas. Downloads the final workbook.</div>
     <button class="btn" id="btn" onclick="run()">&#9889; Format Report</button>
     <div class="pg" id="pg"><div class="pf" id="pf" style="width:0%"></div></div>
     <div class="log" id="log"></div>
-    <div class="dl" id="dl"><h3>&#10003; Done! Your formatted workbook is ready.</h3><p>Download it and open in Excel.</p><a class="dlb" id="dlb" href="#">&#8595; Download Formatted Workbook</a></div>
+    <div class="dl" id="dl"><h3>&#10003; Done!</h3><p>Your formatted workbook is ready to open in Excel.</p><a class="dlb" id="dlb" href="#">&#8595; Download Formatted Workbook</a></div>
   </div>
 </div>
 <script>
-const slots=['wb','ua','tar','sar','rr'];
-slots.forEach(k=>{
-  document.getElementById('f-'+k).addEventListener('change',function(){
-    if(this.files[0]){document.getElementById('s-'+k).classList.add('on');document.getElementById('n-'+k).textContent='✓ '+this.files[0].name;}
+["wb","ua","tar","sar","rr"].forEach(k=>{
+  document.getElementById("f-"+k).addEventListener("change",function(){
+    if(this.files[0]){document.getElementById("s-"+k).classList.add("on");document.getElementById("n-"+k).textContent="✓ "+this.files[0].name;}
   });
 });
-function L(m,c=''){const el=document.getElementById('log');el.classList.add('on');const d=document.createElement('div');if(c)d.className=c;d.textContent='> '+m;el.appendChild(d);el.scrollTop=el.scrollHeight;}
-function P(p){document.getElementById('pg').classList.add('on');document.getElementById('pf').style.width=p+'%';}
+function L(m,c=""){const el=document.getElementById("log");el.classList.add("on");const d=document.createElement("div");if(c)d.className=c;d.textContent="> "+m;el.appendChild(d);el.scrollTop=el.scrollHeight;}
+function P(p){document.getElementById("pg").classList.add("on");document.getElementById("pf").style.width=p+"%";}
 async function run(){
-  const btn=document.getElementById('btn');btn.disabled=true;
-  document.getElementById('log').innerHTML='';document.getElementById('log').classList.remove('on');
-  document.getElementById('dl').classList.remove('on');document.getElementById('pg').classList.remove('on');
-  const date=document.getElementById('date').value.trim();const prop=document.getElementById('prop').value;
-  if(!date){alert('Please enter the report date.');btn.disabled=false;return;}
-  if(!document.getElementById('f-wb').files[0]){alert('Please upload the working workbook.');btn.disabled=false;return;}
+  const btn=document.getElementById("btn");btn.disabled=true;
+  document.getElementById("log").innerHTML="";document.getElementById("log").classList.remove("on");
+  document.getElementById("dl").classList.remove("on");document.getElementById("pg").classList.remove("on");
+  const date=document.getElementById("date").value.trim();const prop=document.getElementById("prop").value;
+  if(!date){alert("Please enter the report date.");btn.disabled=false;return;}
+  if(!document.getElementById("f-wb").files[0]){alert("Please upload the working workbook.");btn.disabled=false;return;}
   const form=new FormData();
-  form.append('date',date);form.append('prop',prop);
-  ['wb','ua','tar','sar','rr'].forEach(k=>{const f=document.getElementById('f-'+k).files[0];if(f)form.append(k,f);});
-  L('Uploading and formatting...');P(20);
+  form.append("date",date);form.append("prop",prop);
+  ["wb","ua","tar","sar","rr"].forEach(k=>{const f=document.getElementById("f-"+k).files[0];if(f)form.append(k,f);});
+  L("Uploading and formatting...");P(20);
   try{
-    const resp=await fetch('/format',{method:'POST',body:form});
+    const resp=await fetch("/format",{method:"POST",body:form});
     P(80);
-    if(!resp.ok){const e=await resp.json();L('Error: '+(e.error||'Unknown'),'le');btn.disabled=false;return;}
+    if(!resp.ok){
+      let msg="Server error";
+      try{const e=await resp.json();msg=e.error||msg;}catch(e){}
+      L("Error: "+msg,"le");btn.disabled=false;return;
+    }
     const blob=await resp.blob();P(100);
-    L('Done!','li');
+    L("Done!","li");
     const url=URL.createObjectURL(blob);
-    const prefix=prop.split('(')[0].trim().replace(/ /g,'_');
-    const fname=prefix+'_Weekly_'+date.replace(/\\./g,'')+'_Formatted.xlsx';
-    const a=document.getElementById('dlb');a.href=url;a.download=fname;
-    document.getElementById('dl').classList.add('on');
-  }catch(e){L('Error: '+e.message,'le');}
+    const prefix=prop.split("(")[0].trim().replace(/ /g,"_");
+    const fname=prefix+"_Weekly_"+date.replace(/\\./g,"")+"_Formatted.xlsx";
+    const a=document.getElementById("dlb");a.href=url;a.download=fname;
+    document.getElementById("dl").classList.add("on");
+  }catch(e){L("Error: "+e.message,"le");}
   btn.disabled=false;
 }
-</script></body></html>''')
-
-@app.route('/format', methods=['POST'])
-def format_report():
-    try:
-        date=request.form.get('date','').strip()
-        prop=request.form.get('prop','').strip()
-        if not date or not prop: return {'error':'Missing date or property'},400
-        wb_file=request.files.get('wb')
-        if not wb_file: return {'error':'Workbook required'},400
-        wb_bytes=wb_file.read()
-        wb_src=openpyxl.load_workbook(io.BytesIO(wb_bytes))
-        pTAR=get_notes(wb_src,'Tenant AR'); pSAR=get_notes(wb_src,'Sub AR'); pSAR2=get_notes(wb_src,'SUB AR'); pSAR.update(pSAR2)
-        wb_out=openpyxl.Workbook(); wb_out.remove(wb_out.active)
-        ua_ws=tar_ws=sar_ws=None
-        ua_f=request.files.get('ua')
-        if ua_f: ua_ws,_,_,_=fmt_ua(wb_out,ua_f.read(),date,prop)
-        tar_f=request.files.get('tar')
-        if tar_f: tar_ws,_,_,_=fmt_ar(wb_out,tar_f.read(),date,pTAR,False)
-        sar_f=request.files.get('sar')
-        if sar_f: sar_ws,_,_,_=fmt_ar(wb_out,sar_f.read(),date,pSAR,True)
-        rr_f=request.files.get('rr')
-        if rr_f: fmt_rr(wb_out,rr_f.read(),date,prop)
-        copy_ws(wb_src,wb_out,date,ua_ws,tar_ws,sar_ws)
-        out=io.BytesIO(); wb_out.save(out); out.seek(0)
-        prefix=prop.split('(')[0].strip().replace(' ','_')
-        fname=f'{prefix}_Weekly_{date.replace(".","")}_Formatted.xlsx'
-        return send_file(out,mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',as_attachment=True,download_name=fname)
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return {'error':str(e)},500
+</script></body></html>'''
 
 if __name__=='__main__':
     port=int(os.environ.get('PORT',5000))
-    print(f'\n  Weekly Report Formatter running at http://localhost:{port}\n')
     app.run(host='0.0.0.0',port=port,debug=False)
+
