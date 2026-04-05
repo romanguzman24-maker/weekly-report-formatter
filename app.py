@@ -119,7 +119,7 @@ def get_notes(wb, prefix):
 def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
     wb_r=openpyxl.load_workbook(io.BytesIO(raw_bytes),data_only=True,keep_vba=False,read_only=True)
     rr=list(wb_r.active.iter_rows(values_only=True)); wb_r.close()
-    NL='Comments' if is_sub else 'Delinquency notes'; tc=BLACK if is_sub else DARKGRAY
+    NL='Comments'; tc=BLACK if is_sub else DARKGRAY
     tab=f'{"SUB AR" if is_sub else "Tenant AR"} {date}'
     if tab in wb_out.sheetnames: del wb_out[tab]
     ws=wb_out.create_sheet(tab); MC=13
@@ -132,13 +132,13 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
     # Header rows 4-6 — gray, NO borders, NO label in row 4 col M
     h4=['','','','','Total','','','','','','','','']   # col M row 4 = blank
     h5=['','','','','Unpaid','0-30','31-60','61-90','Over 90','','','','']
-    h6=['Unit','Resident','Status','Name','Charges','days','days','days','days','Prepays','Suspense','Balance',NL]
+    h6=['Unit','Resident','Status','Name','Charges','days','days','days','days','Prepays','Suspense','Balance','Comments']
     for c in range(1,MC+1):
         ra=5<=c<=12
         for ri,hdr in [(4,h4),(5,h5),(6,h6)]:
             cell=ws.cell(ri,c); cell.value=hdr[c-1]; cell.font=gfont(bold=True)
             cell.fill=gfill(GRAY_AR)  # NO border on rows 4-6
-            cell.alignment=Alignment(horizontal='right' if ra else ('left' if c!=13 else 'left'),vertical='center',wrap_text=False)
+            cell.alignment=Alignment(horizontal='right' if ra else ('center' if c==13 else 'left'),vertical='center',wrap_text=False)
     for r in range(1,4): ws.cell(r,13).fill=gfill(GREEN); ws.cell(r,13).font=gfont(color=tc)
     # Parse data
     hi=next((i for i,r in enumerate(rr[:10]) if r and any(str(c or '').lower()=='unit' for c in r) and any(str(c or '').lower()=='resident' for c in r)),5)
@@ -174,7 +174,7 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
             cell.alignment=Alignment(horizontal='right' if c>=5 else 'left',vertical='center',wrap_text=False)
             if isn: cell.number_format='#,##0.00'
         nc=ws.cell(rn,13); nc.value=note or None; nc.font=gfont(color=BLACK)
-        nc.fill=gfill(WHITE); nc.alignment=Alignment(horizontal='left',vertical='center',wrap_text=False)
+        nc.fill=gfill(WHITE); nc.alignment=Alignment(horizontal='center',vertical='center',wrap_text=False)
         nc.number_format='@'
     # Write main data rows (positive charges)
     data_start=7; rn=data_start
@@ -269,14 +269,16 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
                 if fmt: cell.number_format=fmt
             sc(1,unit)                                          # A: Unit
             sc(2,ut)                                           # B: Unit Type
-            sc(3,set_aside(ut))                                # C: Unit Set Aside (decoded)
-            ws.cell(rn,4).value=sq or 0; ws.cell(rn,4).font=gfont(color=fc); ws.cell(rn,4).fill=gfill(WHITE)  # D: Sq Ft
-            ws.cell(rn,4).alignment=Alignment(horizontal='right',vertical='center',wrap_text=False); ws.cell(rn,4).number_format='#,##0'
+            sc(3,set_aside(ut),'center')                       # C: Unit Set Aside — centered
+            ws.cell(rn,4).value=sq or 0; ws.cell(rn,4).font=gfont(color=fc); ws.cell(rn,4).fill=gfill(WHITE)  # D: Sq Ft — centered
+            ws.cell(rn,4).alignment=Alignment(horizontal='center',vertical='center',wrap_text=False); ws.cell(rn,4).number_format='#,##0'
             sc(5,'VACANT' if isvac else rname)                 # E: Resident
             sc(6,'VACANT' if isvac else rname)                 # F: Name
             for col,val in [(7,mr),(8,tr),(9,dep)]:            # G: Market Rent  H: Actual Rent  I: Res Deposit
                 ws.cell(rn,col).value=val or 0; ws.cell(rn,col).font=gfont(color=fc); ws.cell(rn,col).fill=gfill(WHITE)
-                ws.cell(rn,col).alignment=Alignment(horizontal='right',vertical='center',wrap_text=False); ws.cell(rn,col).number_format='#,##0.00'
+                # H(8) and I(9) centered, G(7) right-aligned
+                h_align='center' if col in (8,9) else 'right'
+                ws.cell(rn,col).alignment=Alignment(horizontal=h_align,vertical='center',wrap_text=False); ws.cell(rn,col).number_format='#,##0.00'
             # J: Move In  K: Lease Expiration  L: Move Out
             for col,dv in [(10,mi),(11,lt),(12,None)]:
                 cell=ws.cell(rn,col); cell.value=dv; cell.font=gfont(color=fc); cell.fill=gfill(WHITE)
