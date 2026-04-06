@@ -35,23 +35,44 @@ def bgray():  return Border(top=TG,bottom=TG,left=TG,right=TG)
 
 def parse_ua(ws):
     out=[]; status='Occupied'
+    # Auto-detect column offset: some exports have unit in col A, others in col B
+    offset=0
     for row in ws.iter_rows(values_only=True):
+        for i,v in enumerate(row[:3]):
+            if re.match(r'^\d{2}-\d{3}',str(v or '').strip()):
+                offset=i; break
+        else: continue
+        break
+    for row in ws.iter_rows(values_only=True):
+        if len(row) <= offset: continue
         c0=str(row[0] or '').strip()
-        if not c0: continue
         lo=c0.lower()
-        if 'village at' in lo and not (row[1] or '') and not (row[2] or ''):
+        if 'village at' in lo:
             if   re.search(r'- occupied',lo): status='Occupied'
             elif re.search(r'- vacant',lo):   status='Vacant'
             elif re.search(r'- notice',lo):   status='Notice'
             continue
-        if c0 in ('Unit','Total') or re.match(r'^(Unit Availability|Showing|Group|As Of)',c0): continue
-        if not re.match(r'^\d{2}-\d{3}',c0): continue
-        out.append({'status':status,'unit':c0,'res_id':str(row[1] or '').strip(),
-            'name':str(row[2] or '').strip(),'res_rent':row[3],'unit_rent':row[4],
-            'res_dep':row[5],'unit_dep':row[6],'yardi_st':str(row[7] or '').strip(),
-            'days':row[8],'make_rdy':row[9],'move_in':row[10],'hold':str(row[11] or '').strip(),
-            'hold_until':row[12],'notice':row[13],'move_out':row[14],
-            'lease_sgn':row[15],'lease_from':row[16],'lease_to':row[17]})
+        unit=str(row[offset] or '').strip()
+        if not re.match(r'^\d{2}-\d{3}',unit): continue
+        o=offset
+        out.append({'status':status,'unit':unit,
+            'res_id':str(row[o+1] or '').strip(),
+            'name':str(row[o+2] or '').strip(),
+            'res_rent':row[o+3] if len(row)>o+3 else None,
+            'unit_rent':row[o+4] if len(row)>o+4 else None,
+            'res_dep':row[o+5] if len(row)>o+5 else None,
+            'unit_dep':row[o+6] if len(row)>o+6 else None,
+            'yardi_st':str(row[o+7] or '').strip() if len(row)>o+7 else '',
+            'days':row[o+8] if len(row)>o+8 else None,
+            'make_rdy':row[o+9] if len(row)>o+9 else None,
+            'move_in':row[o+10] if len(row)>o+10 else None,
+            'hold':str(row[o+11] or '').strip() if len(row)>o+11 else '',
+            'hold_until':row[o+12] if len(row)>o+12 else None,
+            'notice':row[o+13] if len(row)>o+13 else None,
+            'move_out':row[o+14] if len(row)>o+14 else None,
+            'lease_sgn':row[o+15] if len(row)>o+15 else None,
+            'lease_from':row[o+16] if len(row)>o+16 else None,
+            'lease_to':row[o+17] if len(row)>o+17 else None})
     return out
 
 def fmt_ua(wb_out, raw_bytes, date, prop):
@@ -247,16 +268,26 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
     ws.row_dimensions[5].height=28
 
     hi=next((i for i,r in enumerate(rr[:10]) if r and any(str(c or '').lower()=='unit' for c in r) and any('type' in str(c or '').lower() for c in r)),4)
+    # Auto-detect column offset: unit may be in col index 0 or 1
+    rr_offset=1  # default: unit in col B (index 1)
+    for row in rr[hi+1:]:
+        if not row: continue
+        if re.match(r'^\d{2}-\d{3}',str(row[0] or '').strip()):
+            rr_offset=0; break
+        if re.match(r'^\d{2}-\d{3}',str(row[1] or '').strip()):
+            rr_offset=1; break
     V,O=[],[]
     for row in rr[hi+1:]:
         if not row or all(c is None or c=='' for c in row): continue
-        unit=str(row[1] or '').strip()
+        if len(row) <= rr_offset: continue
+        unit=str(row[rr_offset] or '').strip()
         if not re.match(r'^\d{2}-\d{3}',unit): continue
-        rname=str(row[3] or '').strip()
-        if rname.strip().upper() in ('VACANT',' VACANT') or not rname.strip(): V.append(row)
-        else: O.append(row)
-    V.sort(key=lambda r:str(r[1] or '').strip())
-    O.sort(key=lambda r:str(r[1] or '').strip())
+        o=rr_offset
+        rname=str(row[o+2] or '').strip() if len(row)>o+2 else ''
+        if rname.strip().upper() in ('VACANT',' VACANT') or not rname.strip(): V.append((row,o))
+        else: O.append((row,o))
+    V.sort(key=lambda x:str(x[0][x[1]] or '').strip())
+    O.sort(key=lambda x:str(x[0][x[1]] or '').strip())
 
     def set_aside(unit_type):
         code=str(unit_type or '').strip()
@@ -268,11 +299,20 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         if last=='M': return 'Exempt Unit'
         return ''
 
-    def write_rr_row(rn, row, fc):
-        unit=str(row[1] or '').strip(); ut=str(row[2] or '').strip()
-        rname=str(row[3] or '').strip()
-        sq=row[4]; mr=row[5]; lg=row[6]; sr=row[7]; tr=row[8]
-        lr=row[9]; vac=row[10]; dep=row[11]; mi=row[12]; lf=row[13]; lt=row[14]
+    def write_rr_row(rn, row, o, fc):
+        unit=str(row[o] or '').strip(); ut=str(row[o+1] or '').strip() if len(row)>o+1 else ''
+        rname=str(row[o+2] or '').strip() if len(row)>o+2 else ''
+        sq=row[o+3] if len(row)>o+3 else None
+        mr=row[o+4] if len(row)>o+4 else None
+        lg=row[o+5] if len(row)>o+5 else None
+        sr=row[o+6] if len(row)>o+6 else None
+        tr=row[o+7] if len(row)>o+7 else None
+        lr=row[o+8] if len(row)>o+8 else None
+        vac=row[o+9] if len(row)>o+9 else None
+        dep=row[o+10] if len(row)>o+10 else None
+        mi=row[o+11] if len(row)>o+11 else None
+        lf=row[o+12] if len(row)>o+12 else None
+        lt=row[o+13] if len(row)>o+13 else None
         isvac=rname.strip().upper() in ('VACANT',' VACANT') or not rname.strip()
 
         def sc(col,val,h='left',fmt=None):
@@ -312,8 +352,8 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         ws.row_dimensions[rn].height=15.0
 
     rn=6
-    for row in V: write_rr_row(rn,row,RED_FONT); rn+=1
-    for row in O: write_rr_row(rn,row,BLACK); rn+=1
+    for row,o in V: write_rr_row(rn,row,o,RED_FONT); rn+=1
+    for row,o in O: write_rr_row(rn,row,o,BLACK); rn+=1
     data_end=rn-1
 
     for c in range(1,MC+1):
@@ -334,22 +374,22 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
 
     occ_sq=occ_mr=occ_sr=occ_tr=occ_dep=0; occ_cnt=0
     vac_sq=vac_mr=0; vac_cnt=len(V)
-    for row in O:
-        try: occ_sq+=float(row[4] or 0)
+    for row,o in O:
+        try: occ_sq+=float(row[o+3] or 0)
         except: pass
-        try: occ_mr+=float(str(row[5] or 0).replace(',',''))
+        try: occ_mr+=float(str(row[o+4] or 0).replace(',',''))
         except: pass
-        try: occ_sr+=float(str(row[7] or 0).replace(',',''))
+        try: occ_sr+=float(str(row[o+6] or 0).replace(',',''))
         except: pass
-        try: occ_tr+=float(str(row[8] or 0).replace(',',''))
+        try: occ_tr+=float(str(row[o+7] or 0).replace(',',''))
         except: pass
-        try: occ_dep+=float(str(row[11] or 0).replace(',',''))
+        try: occ_dep+=float(str(row[o+10] or 0).replace(',',''))
         except: pass
         occ_cnt+=1
-    for row in V:
-        try: vac_sq+=float(row[4] or 0)
+    for row,o in V:
+        try: vac_sq+=float(row[o+3] or 0)
         except: pass
-        try: vac_mr+=float(str(row[5] or 0).replace(',',''))
+        try: vac_mr+=float(str(row[o+4] or 0).replace(',',''))
         except: pass
     tot_sq=occ_sq+vac_sq; tot_mr=occ_mr+vac_mr; tot_cnt=occ_cnt+vac_cnt
 
@@ -575,7 +615,7 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.1'})
+    return jsonify({'status':'ok','version':'9.2'})
 
 @app.route('/')
 def index():
@@ -625,10 +665,14 @@ def format_report():
         wb_ro.close()
 
         desired_order=['Weekly Summary ','Unit Availability '+date,'Rent Roll '+date,'Tenant AR '+date,'SUB AR '+date]
-        current=wb_out.sheetnames
+        current=list(wb_out.sheetnames)
         ordered=[t for t in desired_order if t in current]+[t for t in current if t not in desired_order]
-        for i,name in enumerate(ordered):
-            wb_out.move_sheet(name,offset=-wb_out.sheetnames.index(name)+i)
+        # Move sheets into correct order by repeatedly moving each to its target position
+        for target_i,name in enumerate(ordered):
+            current=list(wb_out.sheetnames)
+            current_i=current.index(name)
+            if current_i!=target_i:
+                wb_out.move_sheet(name,offset=target_i-current_i)
 
         # Save to a temp buffer first, then patch the XML to remove any
         # circular reference cache that causes Excel's warning on open
@@ -699,7 +743,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.1</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.2</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
