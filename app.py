@@ -49,11 +49,11 @@ def parse_ua(ws):
         c0=str(row[0] or '').strip()
         lo=c0.lower()
 
-        # Section header — detect status
-        if any(x in lo for x in ['- vacant','- notice','- occupied','- past']):
-            if   'notice' in lo: status='Notice'
+        # Section header — detect status (order matters: occupied before notice)
+        if any(x in lo for x in ['- vacant','- notice','- occupied','- past','- current']):
+            if   'occupied' in lo or ('current' in lo and 'notice' not in lo): status='Occupied'
             elif 'vacant' in lo: status='Vacant'
-            elif 'occupied' in lo or 'current' in lo: status='Occupied'
+            elif 'notice' in lo: status='Notice'
             continue
 
         # Skip non-data rows
@@ -285,20 +285,22 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
     ws.row_dimensions[5].height=28
 
     hi=next((i for i,r in enumerate(rr[:10]) if r and any(str(c or '').lower()=='unit' for c in r) and any('type' in str(c or '').lower() for c in r)),4)
-    # Auto-detect column offset: unit may be in col index 0 or 1
-    rr_offset=1  # default: unit in col B (index 1)
+    # Auto-detect column offset AND unit pattern (XX-XXX or 4-digit)
+    rr_offset=1; unit_pat=r'^\d{2}-\d{3}'
     for row in rr[hi+1:]:
         if not row: continue
-        if re.match(r'^\d{2}-\d{3}',str(row[0] or '').strip()):
-            rr_offset=0; break
-        if re.match(r'^\d{2}-\d{3}',str(row[1] or '').strip()):
-            rr_offset=1; break
+        v0=str(row[0] or '').strip()
+        v1=str(row[1] or '').strip() if len(row)>1 else ''
+        if re.match(r'^\d{2}-\d{3}',v0): rr_offset=0; unit_pat=r'^\d{2}-\d{3}'; break
+        if re.match(r'^\d{2}-\d{3}',v1): rr_offset=1; unit_pat=r'^\d{2}-\d{3}'; break
+        if re.match(r'^\d{3,5}$',v0): rr_offset=0; unit_pat=r'^\d{3,5}'; break
+        if re.match(r'^\d{3,5}$',v1): rr_offset=1; unit_pat=r'^\d{3,5}'; break
     V,O=[],[]
     for row in rr[hi+1:]:
         if not row or all(c is None or c=='' for c in row): continue
         if len(row) <= rr_offset: continue
         unit=str(row[rr_offset] or '').strip()
-        if not re.match(r'^\d{2}-\d{3}',unit): continue
+        if not re.match(unit_pat,unit): continue
         o=rr_offset
         rname=str(row[o+2] or '').strip() if len(row)>o+2 else ''
         if rname.strip().upper() in ('VACANT',' VACANT') or not rname.strip(): V.append((row,o))
@@ -632,7 +634,7 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.3'})
+    return jsonify({'status':'ok','version':'9.4'})
 
 @app.route('/')
 def index():
@@ -770,7 +772,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.3</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.4</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
