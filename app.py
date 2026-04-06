@@ -630,10 +630,23 @@ def format_report():
         for i,name in enumerate(ordered):
             wb_out.move_sheet(name,offset=-wb_out.sheetnames.index(name)+i)
 
-        out=io.BytesIO(); wb_out.save(out); out.seek(0)
+        # Save to a temp buffer first, then patch the XML to remove any
+        # circular reference cache that causes Excel's warning on open
+        import zipfile, re as _re
+        raw=io.BytesIO(); wb_out.save(raw); raw.seek(0)
+        patched=io.BytesIO()
+        with zipfile.ZipFile(raw,'r') as zin, zipfile.ZipFile(patched,'w',zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.namelist():
+                data=zin.read(item)
+                if item=='xl/workbook.xml':
+                    txt=data.decode('utf-8')
+                    txt=_re.sub(r'<calcPr[^/]*/>',"<calcPr calcId=\"191\" refMode=\"A1\"/>",txt)
+                    data=txt.encode('utf-8')
+                zout.writestr(item,data)
+        patched.seek(0)
         prefix=prop.split('(')[0].strip().replace(' ','_')
         fname=f'{prefix}_Weekly_{date.replace(".","")}_Formatted.xlsx'
-        return send_file(out,mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',as_attachment=True,download_name=fname)
+        return send_file(patched,mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',as_attachment=True,download_name=fname)
     except Exception as e:
         traceback.print_exc()
         return jsonify({'error':str(e)}),500
