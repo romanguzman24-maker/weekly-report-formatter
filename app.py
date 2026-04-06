@@ -14,6 +14,18 @@ KG_RED='FFF28E86'; KG_YEL='FFFDD868'; KG_BLUE='FF8CB5F9'
 WHITE='FFFFFFFF'; BLACK='FF000000'; DARKGRAY='FF505050'; RED_FONT='FFFF0000'
 BLUE_IN='FF8CB5F9'
 
+PROPERTY_UNITS = {
+    'Village at Madrone (fka Village at Morgan Hill) (x93)': 249,
+    'Village at First': 120,
+    'Village at Santa Teresa': 100,
+}
+
+def get_total_units(prop):
+    for key, val in PROPERTY_UNITS.items():
+        if key.lower() in prop.lower() or prop.lower() in key.lower():
+            return val
+    return 249  # fallback
+
 def gfill(h): return PatternFill(fill_type='solid', fgColor=h)
 def gfont(bold=False,sz=9,color='FF000000'): return Font(name='Calibri',size=sz,bold=bold,color=color)
 def galign(h='left',v='center',wrap=False): return Alignment(horizontal=h,vertical=v,wrap_text=wrap)
@@ -66,7 +78,6 @@ def fmt_ua(wb_out, raw_bytes, date, prop):
             cell=ws.cell(r,c); cell.value=hdr[c-1] if hdr[c-1] is not None else ''
             cell.font=gfont(bold=True); cell.fill=gfill(GRAY_HDR)
             cell.alignment=Alignment(horizontal='center',vertical='center',wrap_text=False)
-    # Date cols in UA: N(14)=MakeReady, O(15)=MoveIn, Q(17)=HoldUntil, R(18)=MoveOut, S(19)=LeaseSign, T(20)=LeaseFrom, U(21)=LeaseTo
     DATE_COLS={14,15,17,18,19,20,21}
     rn=8; blank=False
     for p in V+N+O:
@@ -123,26 +134,23 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
     tab=f'{"SUB AR" if is_sub else "Tenant AR"} {date}'
     if tab in wb_out.sheetnames: del wb_out[tab]
     ws=wb_out.create_sheet(tab); MC=13
-    # Title rows 1-3 — green, no borders
     for ti in range(3):
         for c in range(1,MC+1):
             ws.cell(ti+1,c).fill=gfill(GREEN); ws.cell(ti+1,c).font=gfont(color=tc)
             ws.cell(ti+1,c).alignment=Alignment(horizontal='center',vertical='center',wrap_text=False)
         ws.cell(ti+1,1).value=str(rr[ti][0] if ti<len(rr) and rr[ti] else '')
-    # Header rows 4-6 — gray, NO borders, NO label in row 4 col M
-    h4=['','','','','Total','','','','','','','','']   # col M row 4 = blank
+    h4=['','','','','Total','','','','','','','','']
     h5=['','','','','Unpaid','0-30','31-60','61-90','Over 90','','','','']
     h6=['Unit','Resident','Status','Name','Charges','days','days','days','days','Prepays','Suspense','Balance','Comments']
     for c in range(1,MC+1):
         ra=5<=c<=12
         for ri,hdr in [(4,h4),(5,h5),(6,h6)]:
             cell=ws.cell(ri,c); cell.value=hdr[c-1]; cell.font=gfont(bold=True)
-            cell.fill=gfill(GRAY_AR)  # NO border on rows 4-6
+            cell.fill=gfill(GRAY_AR)
             cell.alignment=Alignment(horizontal='right' if ra else ('center' if c==13 else 'left'),vertical='center',wrap_text=False)
     for r in range(1,4): ws.cell(r,13).fill=gfill(GREEN); ws.cell(r,13).font=gfont(color=tc)
-    # Parse data
     hi=next((i for i,r in enumerate(rr[:10]) if r and any(str(c or '').lower()=='unit' for c in r) and any(str(c or '').lower()=='resident' for c in r)),5)
-    ev,cu,no,cr=[],[],[],[]  # cr = credits (negative charges)
+    ev,cu,no,cr=[],[],[],[]
     for row in rr[hi+1:]:
         if not row or all(c is None or c=='' for c in row): continue
         st=str(row[2] or '').strip().lower(); u=str(row[0] or '').strip()
@@ -151,7 +159,6 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
         charges=row[4]
         try: charge_val=float(str(charges or 0).replace(',',''))
         except: charge_val=0
-        # Separate credits (negative total unpaid charges) into their own section
         if charge_val < 0:
             cr.append(row)
         elif st in ('eviction','past'): ev.append(row)
@@ -161,7 +168,6 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
         try: return -(float(str(r[4] or 0).replace(',','')))
         except: return 0
     ev.sort(key=sk); cu.sort(key=sk); no.sort(key=sk)
-    # Write a row of data
     def write_row(rn, row, rc):
         rid=str(row[1] or '').strip(); note=prev_notes.get(rid,'')
         for c in range(1,13):
@@ -176,13 +182,11 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
         nc=ws.cell(rn,13); nc.value=None; nc.font=gfont(color=BLACK)
         nc.fill=gfill(WHITE); nc.alignment=Alignment(horizontal='center',vertical='center',wrap_text=False)
         nc.number_format='@'
-    # Write main data rows (positive charges)
     data_start=7; rn=data_start
     for row in ev+cu+no:
         st=str(row[2] or '').strip().lower()
         rc=RED_FONT if (not is_sub and st in ('notice','eviction','past')) else BLACK
         write_row(rn,row,rc); rn+=1
-    # Total row (positives only)
     tb=bblack()
     pos_end=rn-1
     def write_total(rn, start, end, label='Total'):
@@ -193,10 +197,8 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
             cell.font=gfont(bold=True); cell.fill=gfill(WHITE); cell.border=tb; cell.number_format='#,##0.00'
         for c in [2,3,4,13]: ws.cell(rn,c).fill=gfill(WHITE); ws.cell(rn,c).font=gfont(bold=True); ws.cell(rn,c).border=tb
     write_total(rn,data_start,pos_end); rn+=1
-    # Credits section — blank row, then header, then credit rows, then credits total
     if cr:
-        rn+=1  # blank separator
-        # Credits header row
+        rn+=1
         for c in range(1,MC+1):
             cell=ws.cell(rn,c); cell.fill=gfill(GRAY_AR); cell.font=gfont(bold=True)
             cell.alignment=Alignment(horizontal='left',vertical='center',wrap_text=False)
@@ -211,7 +213,6 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
         write_total(rn,cr_start,cr_end,'Credits Total'); rn+=1
     for i,w in enumerate([9,13,10,24,12,10,10,10,10,10,10,12,38],1): ws.column_dimensions[get_column_letter(i)].width=w
     ws.freeze_panes='A7'
-    # Return the positive total for Weekly Summary (excludes credits)
     return ws, len(ev), len(cu), len(no), pos_end, data_start
 
 def fmt_rr(wb_out, raw_bytes, date, prop):
@@ -223,13 +224,7 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
 
     import datetime as _dt
 
-    # Columns A-O:
-    # A=Unit  B=Unit Type  C=Unit Set Aside  D=Resident Name  E=Sq Ft
-    # F=Market Rent  G=Loss/Gain to Lease  H=Sub Rent  I=Tenant Rent
-    # J=Lease Rent  K=Vacancy  L=Deposit  M=Move In  N=Lease From  O=Lease To
     MC=15
-
-    # ── GREEN TITLE ROWS 1-4 ─────────────────────────────────────────────────
     title1=str(rr[0][0] or 'FPI Rent Roll') if rr else 'FPI Rent Roll'
     title2=str(rr[1][0] or prop) if len(rr)>1 else prop
     title3=str(rr[2][0] or f'As of Date: {date}') if len(rr)>2 else f'As of Date: {date}'
@@ -242,7 +237,6 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         ws.cell(r,1).value=txt
         ws.merge_cells(start_row=r,start_column=1,end_row=r,end_column=MC)
 
-    # ── HEADER ROW 5 ─────────────────────────────────────────────────────────
     h5=['Unit','Unit Type','Unit Set Aside','Resident Name','Sq Ft',
         'Market Rent','Loss/Gain\nto Lease','Sub Rent','Tenant Rent',
         'Lease Rent','Vacancy','Deposit','Move In','Lease From','Lease To']
@@ -252,7 +246,6 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         cell.alignment=Alignment(horizontal='center',vertical='center',wrap_text=True)
     ws.row_dimensions[5].height=28
 
-    # ── PARSE DATA ────────────────────────────────────────────────────────────
     hi=next((i for i,r in enumerate(rr[:10]) if r and any(str(c or '').lower()=='unit' for c in r) and any('type' in str(c or '').lower() for c in r)),4)
     V,O=[],[]
     for row in rr[hi+1:]:
@@ -289,35 +282,28 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
 
         sc(1,unit)
         sc(2,ut)
-        sc(3,set_aside(ut),'center')               # Unit Set Aside
-        sc(4,' VACANT' if isvac else rname)         # Resident Name
-        sc(5,sq or 0,'center','#,##0')              # Sq Ft
-        sc(6,mr or 0,'right','#,##0.00')            # Market Rent
-        # Loss/Gain
+        sc(3,set_aside(ut),'center')
+        sc(4,' VACANT' if isvac else rname)
+        sc(5,sq or 0,'center','#,##0')
+        sc(6,mr or 0,'right','#,##0.00')
         try: lg_val=0 if isvac else float(str(lg or 0).replace(',',''))
         except: lg_val=0
         sc(7,lg_val,'right','#,##0.00')
-        # Sub Rent
         try: sr_val=float(str(sr or 0).replace(',',''))
         except: sr_val=0
         sc(8,sr_val,'right','#,##0.00')
-        # Tenant Rent
         try: tr_val=float(str(tr or 0).replace(',',''))
         except: tr_val=0
         sc(9,tr_val,'right','#,##0.00')
-        # Lease Rent
         try: lr_val=float(str(lr or 0).replace(',',''))
         except: lr_val=0
         sc(10,lr_val,'right','#,##0.00')
-        # Vacancy
         try: vac_val=-(float(str(mr or 0).replace(',',''))) if isvac else 0
         except: vac_val=0
         sc(11,vac_val,'right','#,##0.00')
-        # Deposit
         try: dep_val=float(str(dep or 0).replace(',',''))
         except: dep_val=0
         sc(12,dep_val,'right','#,##0.00')
-        # Dates M/N/O
         for col,dv in [(13,mi),(14,lf),(15,lt)]:
             cell=ws.cell(rn,col); cell.value=dv; cell.font=gfont(color=fc); cell.fill=gfill(WHITE)
             cell.alignment=Alignment(horizontal='center',vertical='center',wrap_text=False)
@@ -325,13 +311,11 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
                 cell.number_format='MM/DD/YY'
         ws.row_dimensions[rn].height=15.0
 
-    # Write VACANT first (red), then Occupied (black)
     rn=6
     for row in V: write_rr_row(rn,row,RED_FONT); rn+=1
     for row in O: write_rr_row(rn,row,BLACK); rn+=1
     data_end=rn-1
 
-    # ── SUBTOTAL ROW ─────────────────────────────────────────────────────────
     for c in range(1,MC+1):
         ws.cell(rn,c).fill=gfill(GRAY_HDR); ws.cell(rn,c).font=gfont(bold=True)
     for c in range(5,13):
@@ -340,7 +324,6 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         ws.cell(rn,c).alignment=Alignment(horizontal='right',vertical='center')
     rn+=1
 
-    # ── NON-REVENUE UNITS ────────────────────────────────────────────────────
     rn+=1
     for c in range(1,MC+1): ws.cell(rn,c).fill=gfill(GREEN)
     ws.cell(rn,1).value='Non-Revenue Units'; ws.cell(rn,1).font=gfont(bold=True,color='FF000000')
@@ -349,7 +332,6 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
     ws.cell(rn,4).value='No Data Available'; ws.cell(rn,4).font=gfont()
     rn+=2
 
-    # ── SUMMARY SECTION ───────────────────────────────────────────────────────
     occ_sq=occ_mr=occ_sr=occ_tr=occ_dep=0; occ_cnt=0
     vac_sq=vac_mr=0; vac_cnt=len(V)
     for row in O:
@@ -403,15 +385,15 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         for ci in range(4,13): ws.cell(rn,ci).border=Border(top=T,bottom=T,left=T,right=T)
         rn+=1
 
-    # ── COLUMN WIDTHS ─────────────────────────────────────────────────────────
     for col,w in {'A':9,'B':12,'C':13,'D':22,'E':7,'F':11,'G':11,'H':9,'I':10,'J':10,'K':10,'L':10,'M':10,'N':10,'O':10}.items():
         ws.column_dimensions[col].width=w
     for r in range(1,5): ws.row_dimensions[r].height=14
     ws.freeze_panes='A6'
     return ws, len(V), len(O)
 
-def build_weekly_summary(wb_out, wb_ro, date, ua_ws=None, tar_ws=None, sar_ws=None, tar_total=0, sar_total=0):
-    """Build Weekly Summary — exact match to your real file, all borders/colors/values correct"""
+def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar_ws=None, tar_total=0, sar_total=0):
+    total_units = get_total_units(prop)
+
     ws_name=next((n for n in wb_ro.sheetnames if 'weekly summary' in n.lower()),None)
     if not ws_name: return
     ws_src=wb_ro[ws_name]
@@ -425,8 +407,8 @@ def build_weekly_summary(wb_out, wb_ro, date, ua_ws=None, tar_ws=None, sar_ws=No
     ws=wb_out.create_sheet(ws_name)
 
     f9=gfont(sz=9); f9b=gfont(bold=True,sz=9)
-    NTV_BLUE='FFBDD7EE'  # Theme 4 tint 0.4 — the light blue used on NTV/Unit#/Move-in Year
-    HDR_BLUE='FFB8CCE4'  # Title header blue
+    NTV_BLUE='FFBDD7EE'
+    HDR_BLUE='FFB8CCE4'
 
     def cell(r,c,val=None,bg=None,bold=False,fmt=None,h='left',bdr=None,wrap=False):
         cell=ws.cell(r,c)
@@ -438,9 +420,8 @@ def build_weekly_summary(wb_out, wb_ro, date, ua_ws=None, tar_ws=None, sar_ws=No
         if bdr: cell.border=bdr
         return cell
 
-    AB=bblack()  # all-sides thin black border
+    AB=bblack()
 
-    # ── TITLE ROWS 1-3 ────────────────────────────────────────────────────────
     for r in range(1,4):
         for c in range(2,8):
             ws.cell(r,c).fill=gfill(HDR_BLUE)
@@ -452,25 +433,22 @@ def build_weekly_summary(wb_out, wb_ro, date, ua_ws=None, tar_ws=None, sar_ws=No
                 left=T if c==2 else None,
                 right=T if c==7 else None
             )
-    ws.cell(1,2).value=src_vals.get((1,2),'Village at Madrone')
+    ws.cell(1,2).value=src_vals.get((1,2), prop.split('(')[0].strip())
     ws.cell(2,2).value=src_vals.get((2,2),'Occupancy & Delinquency Summary')
     ws.cell(3,2).value=date
-    ws.cell(3,2).fill=gfill(BLUE_IN)  # blue input cell
+    ws.cell(3,2).fill=gfill(BLUE_IN)
     for r in range(1,4): ws.merge_cells(start_row=r,start_column=2,end_row=r,end_column=7)
 
-    # ── ROWS 4-22: main data block — all bordered B:G ─────────────────────────
-    # Blank rows 4 and 13 and 15 and 17 and 21 are inside the border block
     for r in range(4,23):
         for c in range(2,8):
             ws.cell(r,c).border=AB
             ws.cell(r,c).font=f9
 
-    # Row 5 — Total Units
-    cell(5,2,src_vals.get((5,2),249),h='center')
+    # Row 5 — Total Units (dynamic per property)
+    cell(5,2,total_units,h='center')
     cell(5,3,'=B5/$B$5',fmt='0.00%',h='center')
     cell(5,4,'Total Units',h='left')
 
-    # Rows 6-12 occupancy
     occ=[
         (6,'Subtract',False,'Physically Vacant'),
         (7,'Add',True,'Applications - Approved @ KG'),
@@ -490,10 +468,8 @@ def build_weekly_summary(wb_out, wb_ro, date, ua_ws=None, tar_ws=None, sar_ws=No
         ws.cell(r,3).value=f'=B{r}/$B$5'; ws.cell(r,3).font=f9; ws.cell(r,3).number_format='0.00%'; ws.cell(r,3).alignment=galign('center')
         ws.cell(r,4).value=desc; ws.cell(r,4).font=f9; ws.cell(r,4).alignment=galign('left')
 
-    # Blue input cells B6,B10,B11
     for r in [6,10,11]: ws.cell(r,2).fill=gfill(BLUE_IN)
 
-    # Row 14 — delinquency
     ws.cell(14,2).fill=gfill(BLUE_IN); ws.cell(14,2).font=f9; ws.cell(14,2).alignment=galign('center'); ws.cell(14,2).border=AB
     ws.cell(14,3).value='=B14/B5'; ws.cell(14,3).font=f9; ws.cell(14,3).number_format='0.00%'; ws.cell(14,3).alignment=galign('center'); ws.cell(14,3).border=AB
     ws.cell(14,4).value='# of tenants owing prev. full month rent, including'; ws.cell(14,4).font=f9; ws.cell(14,4).alignment=galign('left'); ws.cell(14,4).border=AB
@@ -501,13 +477,11 @@ def build_weekly_summary(wb_out, wb_ro, date, ua_ws=None, tar_ws=None, sar_ws=No
     ws.cell(14,6).font=f9; ws.cell(14,6).alignment=galign('center'); ws.cell(14,6).border=AB
     ws.cell(14,7).value='@ legal'; ws.cell(14,7).font=f9; ws.cell(14,7).border=AB
 
-    # Row 16 — physically occupied + leased rent
     ws.cell(16,2).font=f9; ws.cell(16,2).alignment=galign('center'); ws.cell(16,2).border=AB
     ws.cell(16,3).fill=gfill(BLUE_IN); ws.cell(16,3).font=f9; ws.cell(16,3).alignment=galign('center'); ws.cell(16,3).number_format='#,##0_);(#,##0)'; ws.cell(16,3).border=AB
     ws.cell(16,4).value='# Physically Occupied and Total Leased Rent'; ws.cell(16,4).font=f9; ws.cell(16,4).alignment=galign('left'); ws.cell(16,4).border=AB
     for c in [5,6,7]: ws.cell(16,c).border=AB; ws.cell(16,c).font=f9
 
-    # Rows 18-20 — AR section (no $ sign in col B per your real file)
     AR_FMT='_([$$-409]* #,##0.00_);_([$$-409]* \\(#,##0.00\\);_([$$-409]* "-"??_);_(@_)'
     for r,desc in [(18,'Tenant Accounts Receivable (AR)'),(19,'Subsidy Accounts Receivable (AR) '),(20,'Total  AR')]:
         for c in range(2,8): ws.cell(r,c).border=AB; ws.cell(r,c).font=f9
@@ -519,11 +493,9 @@ def build_weekly_summary(wb_out, wb_ro, date, ua_ws=None, tar_ws=None, sar_ws=No
 
     ws.cell(20,3).value='=C18+C19'
 
-    # Row 22 — footnote
     ws.cell(22,2).value='* AR to include current month delinquency beginning 10th of each month'
     for c in range(2,8): ws.cell(22,c).border=AB; ws.cell(22,c).font=f9
 
-    # ── NTV SECTION (rows 25+) ────────────────────────────────────────────────
     ws.cell(25,2).value='NTV'; ws.cell(25,2).font=f9b; ws.cell(25,2).fill=gfill(NTV_BLUE)
     ws.cell(25,2).border=Border(top=T,bottom=T,left=T,right=T)
     ws.cell(25,3).border=Border(top=T,bottom=T,right=T)
@@ -541,7 +513,6 @@ def build_weekly_summary(wb_out, wb_ro, date, ua_ws=None, tar_ws=None, sar_ws=No
         if v2: ws.cell(r,2).value=v2; ws.cell(r,2).alignment=galign('left')
         if v3:
             ws.cell(r,3).value=v3
-            # Format dates as MM/DD/YY — no text wrap
             ws.cell(r,3).number_format='MM/DD/YY'
             ws.cell(r,3).alignment=Alignment(horizontal='center',vertical='center',wrap_text=False)
 
@@ -563,8 +534,8 @@ def build_weekly_summary(wb_out, wb_ro, date, ua_ws=None, tar_ws=None, sar_ws=No
                 try: leased+=float(ua_ws.cell(r,9).value or 0)
                 except: pass
         ws['B6']=-V; ws['B7']=kA; ws['B8']=kP; ws['B9']=sP; ws['B10']=-N
-        ws.cell(16,2).value=occ_count  # physically occupied count
-        ws['C16']=leased               # total leased rent
+        ws.cell(16,2).value=occ_count
+        ws['C16']=leased
 
     if tar_ws:
         ev=b14=f14=0
@@ -580,29 +551,23 @@ def build_weekly_summary(wb_out, wb_ro, date, ua_ws=None, tar_ws=None, sar_ws=No
         ws['B11']=-ev; ws['B14']=b14; ws['F14']=f14
 
     def getT(aw):
-        # Sum Total Unpaid Charges from the main Total row (positive charges only, before Credits section)
         if not aw: return 0
         for r in range(7,aw.max_row+1):
             if str(aw.cell(r,1).value or '').lower()=='total':
                 try: return float(aw.cell(r,5).value or 0)
                 except: return 0
         return 0
-    # Use pre-computed totals passed in from format_report (avoids reading formula cells)
-    # Fall back to getT if not provided
     if tar_total==0 and tar_ws: tar_total=getT(tar_ws)
     if sar_total==0 and sar_ws: sar_total=getT(sar_ws)
     ws['C18']=tar_total
     ws['C19']=sar_total
-    # C20 total AR — direct value so it shows even without formula recalc
     ws.cell(20,3).value=tar_total+sar_total
-    # E18/E19 percentages — direct values
     if ws['C16'].value and float(ws['C16'].value or 0)>0:
         leased_val=float(ws['C16'].value)
         ws.cell(18,5).value=tar_total/leased_val if leased_val else 0
         ws.cell(19,5).value=sar_total/leased_val if leased_val else 0
         ws.cell(20,5).value=(tar_total+sar_total)/leased_val if leased_val else 0
 
-    # ── COLUMN WIDTHS AND ROW HEIGHTS ─────────────────────────────────────────
     for col,w in {'A':16.57,'B':14.43,'C':15.43,'D':41.43,'E':9.29,'F':6.0,'G':7.86}.items():
         ws.column_dimensions[col].width=w
     for r,h in [(1,12),(2,12),(3,12),(4,12),(5,12),(6,12),(7,15.75),(8,15.75),(9,15.75),(10,15.75),(11,15.75),(12,15.75),(13,15.75),(14,12),(15,15.75),(16,16.5),(17,15.75),(18,12),(19,15.75),(20,12),(21,12),(22,12),(25,16.5)]:
@@ -610,7 +575,7 @@ def build_weekly_summary(wb_out, wb_ro, date, ua_ws=None, tar_ws=None, sar_ws=No
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.0'})
+    return jsonify({'status':'ok','version':'9.1'})
 
 @app.route('/')
 def index():
@@ -633,7 +598,6 @@ def format_report():
         pSAR.update(get_notes(wb_ro,'SUB AR'))
         wb_out=openpyxl.Workbook(); wb_out.remove(wb_out.active)
 
-        # Build tabs — collect AR totals directly from parsed data
         ua_ws=tar_ws=sar_ws=None
         tar_total=sar_total=0
 
@@ -643,7 +607,6 @@ def format_report():
         tar_f=request.files.get('tar')
         if tar_f:
             tar_ws,ev,cu,no,pos_end,data_start=fmt_ar(wb_out,tar_f.read(),date,pTAR,False)
-            # Sum Total Unpaid Charges (col 5) from positive rows only
             for r in range(data_start,pos_end+1):
                 try: tar_total+=float(tar_ws.cell(r,5).value or 0)
                 except: pass
@@ -658,11 +621,9 @@ def format_report():
         rr_f=request.files.get('rr')
         if rr_f: fmt_rr(wb_out,rr_f.read(),date,prop)
 
-        # Build Weekly Summary — pass totals directly so no formula evaluation needed
-        build_weekly_summary(wb_out,wb_ro,date,ua_ws,tar_ws,sar_ws,tar_total,sar_total)
+        build_weekly_summary(wb_out,wb_ro,date,prop,ua_ws,tar_ws,sar_ws,tar_total,sar_total)
         wb_ro.close()
 
-        # Reorder tabs: Weekly Summary → Unit Availability → Rent Roll → Tenant AR → SUB AR
         desired_order=['Weekly Summary ','Unit Availability '+date,'Rent Roll '+date,'Tenant AR '+date,'SUB AR '+date]
         current=wb_out.sheetnames
         ordered=[t for t in desired_order if t in current]+[t for t in current if t not in desired_order]
@@ -725,7 +686,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.0</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.1</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
