@@ -458,7 +458,7 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
     ws.freeze_panes='A6'
     return ws, len(V), len(O)
 
-def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar_ws=None, tar_total=0, sar_total=0):
+def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar_ws=None, tar_total=0, sar_total=0, rr_ws=None):
     total_units = get_total_units(prop)
 
     ws_name=next((n for n in wb_ro.sheetnames if 'weekly summary' in n.lower()),None)
@@ -602,7 +602,18 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
                 except: pass
         ws['B6']=-V; ws['B7']=kA; ws['B8']=kP; ws['B9']=sP; ws['B10']=-N
         ws.cell(16,2).value=occ_count
-        ws['C16']=leased
+        # Use Rent Roll Lease Rent col J total if available, else fall back to UA
+        if rr_ws:
+            rr_leased=0
+            for rr_r in range(6,rr_ws.max_row+1):
+                rr_name=str(rr_ws.cell(rr_r,4).value or '').strip()
+                if 'VACANT' in rr_name.upper() or not rr_name: continue
+                if rr_ws.cell(rr_r,1).value is None: continue
+                try: rr_leased+=float(rr_ws.cell(rr_r,10).value or 0)
+                except: pass
+            ws['C16']=rr_leased
+        else:
+            ws['C16']=leased
 
     if tar_ws:
         ev=b14=f14=0
@@ -642,7 +653,7 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.5'})
+    return jsonify({'status':'ok','version':'9.6'})
 
 @app.route('/')
 def index():
@@ -685,10 +696,11 @@ def format_report():
                 try: sar_total+=float(sar_ws.cell(r,5).value or 0)
                 except: pass
 
+        rr_ws=None
         rr_f=request.files.get('rr')
-        if rr_f: fmt_rr(wb_out,rr_f.read(),date,prop)
+        if rr_f: rr_ws,*_=fmt_rr(wb_out,rr_f.read(),date,prop)
 
-        build_weekly_summary(wb_out,wb_ro,date,prop,ua_ws,tar_ws,sar_ws,tar_total,sar_total)
+        build_weekly_summary(wb_out,wb_ro,date,prop,ua_ws,tar_ws,sar_ws,tar_total,sar_total,rr_ws)
         wb_ro.close()
 
         # Reorder tabs: Weekly Summary → Unit Availability → Rent Roll → Tenant AR → SUB AR
@@ -780,7 +792,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.5</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.6</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
