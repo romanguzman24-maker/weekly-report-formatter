@@ -37,19 +37,31 @@ def parse_ua(ws):
     out=[]; status='Occupied'
     rows=list(ws.iter_rows(values_only=True))
 
-    # Detect format: Madrone has KG columns (21 cols), others have 18 cols no KG
-    # Check by looking at header row for 'KG' text
-    has_kg=False
+    # Auto-detect format by scanning first data row:
+    # Madrone: unit in col B (index 1) as XX-XXX, has KG cols
+    # Santa Teresa / Village at First: unit in col A (index 0) as 4-digit, no KG cols
+    has_kg=False; unit_col=0; unit_pat=r'^\d{3,5}$'
+    for row in rows:
+        if not row: continue
+        v0=str(row[0] or '').strip(); v1=str(row[1] or '').strip() if len(row)>1 else ''
+        if re.match(r'^\d{2}-\d{3}',v0): unit_col=0; unit_pat=r'^\d{2}-\d{3}'; break
+        if re.match(r'^\d{2}-\d{3}',v1): unit_col=1; unit_pat=r'^\d{2}-\d{3}'; break
+        if re.match(r'^\d{3,5}$',v0): unit_col=0; unit_pat=r'^\d{3,5}$'; break
+    # Check for KG columns in headers
     for row in rows[:10]:
         if any('kg' in str(v or '').lower() for v in row):
             has_kg=True; break
 
     for row in rows:
         if not row or all(v is None or str(v).strip()=='' for v in row): continue
+        # Use col 0 for section headers always
         c0=str(row[0] or '').strip()
-        lo=c0.lower()
+        # Also check col 1 for section headers (Madrone style)
+        c1=str(row[1] or '').strip() if len(row)>1 else ''
+        hdr=c0 if c0 else c1
+        lo=hdr.lower()
 
-        # Section header — detect status (order matters: occupied before notice)
+        # Section header — detect status (occupied must come before notice)
         if any(x in lo for x in ['- vacant','- notice','- occupied','- past','- current']):
             if   'occupied' in lo or ('current' in lo and 'notice' not in lo): status='Occupied'
             elif 'vacant' in lo: status='Vacant'
@@ -57,38 +69,64 @@ def parse_ua(ws):
             continue
 
         # Skip non-data rows
-        if re.match(r'^(Unit Availability|Showing|Group|As Of|Total|Property)',c0,re.I): continue
-        if c0 in ('Unit',): continue
+        if re.match(r'^(Unit Availability|Showing|Group|As Of|Total|Property)',hdr,re.I): continue
+        if hdr in ('Unit',): continue
 
+        # For Madrone format: status label is directly in col A, unit in col B
+        if unit_col==1 and str(row[0] or '').strip() in ('Vacant','Notice','Occupied'):
+            status=str(row[0]).strip()
+
+        # Get unit value from detected column
+        unit=str(row[unit_col] or '').strip() if len(row)>unit_col else ''
+        if not re.match(unit_pat, unit): continue
+
+        o=unit_col
         if has_kg:
-            # Madrone format: unit in col A as XX-XXX, KG cols at E/F/G
-            if not re.match(r'^\d{2}-\d{3}',c0): continue
-            out.append({'status':status,'unit':c0,
-                'res_id':str(row[1] or '').strip(),
-                'name':str(row[2] or '').strip(),
-                'kg_app':row[3],'kg_pend':row[4],'site_pend':row[5],
-                'res_rent':row[6],'unit_rent':row[7],
-                'res_dep':row[8],'unit_dep':row[9],
-                'yardi_st':str(row[10] or '').strip(),
-                'days':row[11],'make_rdy':row[12],'move_in':row[13],
-                'hold':str(row[14] or '').strip(),
-                'hold_until':row[15],'notice':row[16],'move_out':row[17],
-                'lease_sgn':row[18],'lease_from':row[19],'lease_to':row[20],
+            # Madrone: unit@o, res_id@o+1, name@o+2, kg_app@o+3, kg_pend@o+4, site_pend@o+5
+            # then res_rent@o+6, unit_rent@o+7, res_dep@o+8, unit_dep@o+9
+            out.append({'status':status,'unit':unit,
+                'res_id':str(row[o+1] or '').strip() if len(row)>o+1 else '',
+                'name':str(row[o+2] or '').strip() if len(row)>o+2 else '',
+                'kg_app':row[o+3] if len(row)>o+3 else None,
+                'kg_pend':row[o+4] if len(row)>o+4 else None,
+                'site_pend':row[o+5] if len(row)>o+5 else None,
+                'res_rent':row[o+6] if len(row)>o+6 else None,
+                'unit_rent':row[o+7] if len(row)>o+7 else None,
+                'res_dep':row[o+8] if len(row)>o+8 else None,
+                'unit_dep':row[o+9] if len(row)>o+9 else None,
+                'yardi_st':str(row[o+10] or '').strip() if len(row)>o+10 else '',
+                'days':row[o+11] if len(row)>o+11 else None,
+                'make_rdy':row[o+12] if len(row)>o+12 else None,
+                'move_in':row[o+13] if len(row)>o+13 else None,
+                'hold':str(row[o+14] or '').strip() if len(row)>o+14 else '',
+                'hold_until':row[o+15] if len(row)>o+15 else None,
+                'notice':row[o+16] if len(row)>o+16 else None,
+                'move_out':row[o+17] if len(row)>o+17 else None,
+                'lease_sgn':row[o+18] if len(row)>o+18 else None,
+                'lease_from':row[o+19] if len(row)>o+19 else None,
+                'lease_to':row[o+20] if len(row)>o+20 else None,
                 'has_kg':True})
         else:
-            # Santa Teresa / Village at First format: 4-digit unit, no KG cols
-            if not re.match(r'^\d{3,5}$',c0): continue
-            out.append({'status':status,'unit':c0,
-                'res_id':str(row[1] or '').strip(),
-                'name':str(row[2] or '').strip(),
+            # Santa Teresa / Village at First: no KG cols, unit in col A
+            out.append({'status':status,'unit':unit,
+                'res_id':str(row[o+1] or '').strip() if len(row)>o+1 else '',
+                'name':str(row[o+2] or '').strip() if len(row)>o+2 else '',
                 'kg_app':None,'kg_pend':None,'site_pend':None,
-                'res_rent':row[3],'unit_rent':row[4],
-                'res_dep':row[5],'unit_dep':row[6],
-                'yardi_st':str(row[7] or '').strip(),
-                'days':row[8],'make_rdy':row[9],'move_in':row[10],
-                'hold':str(row[11] or '').strip(),
-                'hold_until':row[12],'notice':row[13],'move_out':row[14],
-                'lease_sgn':row[15],'lease_from':row[16],'lease_to':row[17],
+                'res_rent':row[o+3] if len(row)>o+3 else None,
+                'unit_rent':row[o+4] if len(row)>o+4 else None,
+                'res_dep':row[o+5] if len(row)>o+5 else None,
+                'unit_dep':row[o+6] if len(row)>o+6 else None,
+                'yardi_st':str(row[o+7] or '').strip() if len(row)>o+7 else '',
+                'days':row[o+8] if len(row)>o+8 else None,
+                'make_rdy':row[o+9] if len(row)>o+9 else None,
+                'move_in':row[o+10] if len(row)>o+10 else None,
+                'hold':str(row[o+11] or '').strip() if len(row)>o+11 else '',
+                'hold_until':row[o+12] if len(row)>o+12 else None,
+                'notice':row[o+13] if len(row)>o+13 else None,
+                'move_out':row[o+14] if len(row)>o+14 else None,
+                'lease_sgn':row[o+15] if len(row)>o+15 else None,
+                'lease_from':row[o+16] if len(row)>o+16 else None,
+                'lease_to':row[o+17] if len(row)>o+17 else None,
                 'has_kg':False})
     return out
 
@@ -653,7 +691,7 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.6'})
+    return jsonify({'status':'ok','version':'9.7'})
 
 @app.route('/')
 def index():
@@ -792,7 +830,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.6</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.7</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
