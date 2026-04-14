@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9 — Fast Production Build"""
+"""Weekly Report Formatter v9.8 — Rent Roll ST fix + AR credits/prepays grouping"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -24,7 +24,7 @@ def get_total_units(prop):
     for key, val in PROPERTY_UNITS.items():
         if key.lower() in prop.lower() or prop.lower() in key.lower():
             return val
-    return 249  # fallback
+    return 249
 
 def gfill(h): return PatternFill(fill_type='solid', fgColor=h)
 def gfont(bold=False,sz=9,color='FF000000'): return Font(name='Calibri',size=sz,bold=bold,color=color)
@@ -36,10 +36,6 @@ def bgray():  return Border(top=TG,bottom=TG,left=TG,right=TG)
 def parse_ua(ws):
     out=[]; status='Occupied'
     rows=list(ws.iter_rows(values_only=True))
-
-    # Auto-detect format by scanning first data row:
-    # Madrone: unit in col B (index 1) as XX-XXX, has KG cols
-    # Santa Teresa / Village at First: unit in col A (index 0) as 4-digit, no KG cols
     has_kg=False; unit_col=0; unit_pat=r'^\d{3,5}$'
     for row in rows:
         if not row: continue
@@ -47,43 +43,28 @@ def parse_ua(ws):
         if re.match(r'^\d{2}-\d{3}',v0): unit_col=0; unit_pat=r'^\d{2}-\d{3}'; break
         if re.match(r'^\d{2}-\d{3}',v1): unit_col=1; unit_pat=r'^\d{2}-\d{3}'; break
         if re.match(r'^\d{3,5}$',v0): unit_col=0; unit_pat=r'^\d{3,5}$'; break
-    # Check for KG columns in headers
     for row in rows[:10]:
         if any('kg' in str(v or '').lower() for v in row):
             has_kg=True; break
-
     for row in rows:
         if not row or all(v is None or str(v).strip()=='' for v in row): continue
-        # Use col 0 for section headers always
         c0=str(row[0] or '').strip()
-        # Also check col 1 for section headers (Madrone style)
         c1=str(row[1] or '').strip() if len(row)>1 else ''
         hdr=c0 if c0 else c1
         lo=hdr.lower()
-
-        # Section header — detect status (occupied must come before notice)
         if any(x in lo for x in ['- vacant','- notice','- occupied','- past','- current']):
             if   'occupied' in lo or ('current' in lo and 'notice' not in lo): status='Occupied'
             elif 'vacant' in lo: status='Vacant'
             elif 'notice' in lo: status='Notice'
             continue
-
-        # Skip non-data rows
         if re.match(r'^(Unit Availability|Showing|Group|As Of|Total|Property)',hdr,re.I): continue
         if hdr in ('Unit',): continue
-
-        # For Madrone format: status label is directly in col A, unit in col B
         if unit_col==1 and str(row[0] or '').strip() in ('Vacant','Notice','Occupied'):
             status=str(row[0]).strip()
-
-        # Get unit value from detected column
         unit=str(row[unit_col] or '').strip() if len(row)>unit_col else ''
         if not re.match(unit_pat, unit): continue
-
         o=unit_col
         if has_kg:
-            # Madrone: unit@o, res_id@o+1, name@o+2, kg_app@o+3, kg_pend@o+4, site_pend@o+5
-            # then res_rent@o+6, unit_rent@o+7, res_dep@o+8, unit_dep@o+9
             out.append({'status':status,'unit':unit,
                 'res_id':str(row[o+1] or '').strip() if len(row)>o+1 else '',
                 'name':str(row[o+2] or '').strip() if len(row)>o+2 else '',
@@ -107,7 +88,6 @@ def parse_ua(ws):
                 'lease_to':row[o+20] if len(row)>o+20 else None,
                 'has_kg':True})
         else:
-            # Santa Teresa / Village at First: no KG cols, unit in col A
             out.append({'status':status,'unit':unit,
                 'res_id':str(row[o+1] or '').strip() if len(row)>o+1 else '',
                 'name':str(row[o+2] or '').strip() if len(row)>o+2 else '',
@@ -232,10 +212,13 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
         st=str(row[2] or '').strip().lower(); u=str(row[0] or '').strip()
         if re.search(r'subtotal|village at|^total$',u,re.I): continue
         if not u or not re.match(r'^\d{2}',u): continue
-        charges=row[4]
+        # A row is a credit if Total Unpaid Charges < 0 OR Prepays < 0
+        charges=row[4]; prepays=row[9] if len(row)>9 else None
         try: charge_val=float(str(charges or 0).replace(',',''))
         except: charge_val=0
-        if charge_val < 0:
+        try: prepay_val=float(str(prepays or 0).replace(',',''))
+        except: prepay_val=0
+        if charge_val < 0 or prepay_val < 0:
             cr.append(row)
         elif st in ('eviction','past'): ev.append(row)
         elif st=='notice': no.append(row)
@@ -278,7 +261,7 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
         for c in range(1,MC+1):
             cell=ws.cell(rn,c); cell.fill=gfill(GRAY_AR); cell.font=gfont(bold=True)
             cell.alignment=Alignment(horizontal='left',vertical='center',wrap_text=False)
-        ws.cell(rn,1).value='Credits'; ws.cell(rn,4).value='Name'
+        ws.cell(rn,1).value='Credits / Prepays'; ws.cell(rn,4).value='Name'
         ws.cell(rn,5).value='Charges'; ws.cell(rn,10).value='Prepays'; ws.cell(rn,11).value='Suspense'; ws.cell(rn,12).value='Balance'
         for c in [5,10,11,12]: ws.cell(rn,c).alignment=Alignment(horizontal='right',vertical='center',wrap_text=False)
         rn+=1
@@ -323,8 +306,9 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
     ws.row_dimensions[5].height=28
 
     hi=next((i for i,r in enumerate(rr[:10]) if r and any(str(c or '').lower()=='unit' for c in r) and any('type' in str(c or '').lower() for c in r)),4)
-    # Auto-detect column offset AND unit pattern (XX-XXX or 4-digit)
-    rr_offset=1; unit_pat=r'^\d{2}-\d{3}'
+
+    # Auto-detect unit pattern and column offset
+    rr_offset=0; unit_pat=r'^\d{2}-\d{3}'
     for row in rr[hi+1:]:
         if not row: continue
         v0=str(row[0] or '').strip()
@@ -333,6 +317,22 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         if re.match(r'^\d{2}-\d{3}',v1): rr_offset=1; unit_pat=r'^\d{2}-\d{3}'; break
         if re.match(r'^\d{3,5}$',v0): rr_offset=0; unit_pat=r'^\d{3,5}'; break
         if re.match(r'^\d{3,5}$',v1): rr_offset=1; unit_pat=r'^\d{3,5}'; break
+
+    # Detect if this is a Santa Teresa / 4-digit property with extra header cols
+    # Santa Teresa raw export has: Unit, Unit Type, Unit Set Aside (%), flag col, Resident Name, ...
+    # vs Madrone: Unit, Unit Type, Resident Name, ...
+    # We detect by checking if col 2 (index) in first data row looks like a percentage or set-aside value
+    is_st_format = False
+    for row in rr[hi+1:]:
+        if not row: continue
+        unit_v = str(row[rr_offset] or '').strip()
+        if not re.match(unit_pat, unit_v): continue
+        # Check col rr_offset+2 — if it looks like a % (30%/50%/60%) or numeric set-aside, it's ST format
+        col2_v = str(row[rr_offset+2] or '').strip()
+        if re.match(r'^\d{1,3}%?$', col2_v) or col2_v in ('30%','50%','60%','30','50','60'):
+            is_st_format = True
+        break
+
     V,O=[],[]
     for row in rr[hi+1:]:
         if not row or all(c is None or c=='' for c in row): continue
@@ -340,23 +340,32 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         unit=str(row[rr_offset] or '').strip()
         if not re.match(unit_pat,unit): continue
         o=rr_offset
-        rname=str(row[o+2] or '').strip() if len(row)>o+2 else ''
+        # For ST format: name is at o+4 (after unit, unit_type, set_aside%, flag_col)
+        # For Madrone format: name is at o+2
+        name_idx = o+4 if is_st_format else o+2
+        rname=str(row[name_idx] or '').strip() if len(row)>name_idx else ''
         if rname.strip().upper() in ('VACANT',' VACANT') or not rname.strip(): V.append((row,o))
         else: O.append((row,o))
     V.sort(key=lambda x:str(x[0][x[1]] or '').strip())
     O.sort(key=lambda x:str(x[0][x[1]] or '').strip())
 
+    def set_aside_from_col(val):
+        """Parse set-aside directly from a column value (ST format)."""
+        s = str(val or '').strip().replace('%','')
+        if s == '30': return '30%'
+        if s == '50': return '50%'
+        if s == '60': return '60%'
+        return str(val or '').strip() if val else ''
+
     def set_aside(unit_type):
+        """Decode set-aside from unit type code (Madrone format)."""
         code=str(unit_type or '').strip()
         if not code: return ''
-        # Village at First format: T83XXXX — look for 150/160/250/260 in code
-        import re as _re
-        m=_re.search(r'(1|2)(50|60)',code)
+        m=re.search(r'(1|2)(50|60)',code)
         if m:
             pct=m.group(2)
             if pct=='50': return '50%'
             if pct=='60': return '60%'
-        # Madrone/Santa Teresa format: last char is 3/5/6/M
         last=code[-1].upper()
         if last=='3': return '30%'
         if last=='5': return '50%'
@@ -365,20 +374,47 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         return ''
 
     def write_rr_row(rn, row, o, fc):
-        unit=str(row[o] or '').strip(); ut=str(row[o+1] or '').strip() if len(row)>o+1 else ''
-        rname=str(row[o+2] or '').strip() if len(row)>o+2 else ''
-        sq=row[o+3] if len(row)>o+3 else None
-        mr=row[o+4] if len(row)>o+4 else None
-        lg=row[o+5] if len(row)>o+5 else None
-        sr=row[o+6] if len(row)>o+6 else None
-        tr=row[o+7] if len(row)>o+7 else None
-        lr=row[o+8] if len(row)>o+8 else None
-        vac=row[o+9] if len(row)>o+9 else None
-        dep=row[o+10] if len(row)>o+10 else None
-        mi=row[o+11] if len(row)>o+11 else None
-        lf=row[o+12] if len(row)>o+12 else None
-        lt=row[o+13] if len(row)>o+13 else None
-        isvac=rname.strip().upper() in ('VACANT',' VACANT') or not rname.strip()
+        unit=str(row[o] or '').strip()
+        ut=str(row[o+1] or '').strip() if len(row)>o+1 else ''
+
+        if is_st_format:
+            # ST columns: unit@o, unit_type@o+1, set_aside@o+2, flag@o+3, name@o+4,
+            #             sq_ft@o+5, market_rent@o+6, loss_gain@o+7, sub_rent@o+8,
+            #             tenant_rent@o+9, lease_rent@o+10, vacancy@o+11, deposit@o+12,
+            #             move_in@o+13, lease_from@o+14, lease_to@o+15
+            sa_raw = row[o+2] if len(row)>o+2 else None
+            sa_display = set_aside_from_col(sa_raw)
+            rname = str(row[o+4] or '').strip() if len(row)>o+4 else ''
+            sq    = row[o+5]  if len(row)>o+5  else None
+            mr    = row[o+6]  if len(row)>o+6  else None
+            lg    = row[o+7]  if len(row)>o+7  else None
+            sr    = row[o+8]  if len(row)>o+8  else None
+            tr    = row[o+9]  if len(row)>o+9  else None
+            lr    = row[o+10] if len(row)>o+10 else None
+            vac_r = row[o+11] if len(row)>o+11 else None
+            dep   = row[o+12] if len(row)>o+12 else None
+            mi    = row[o+13] if len(row)>o+13 else None
+            lf    = row[o+14] if len(row)>o+14 else None
+            lt    = row[o+15] if len(row)>o+15 else None
+        else:
+            # Madrone columns: unit@o, unit_type@o+1, name@o+2, sq@o+3, mr@o+4,
+            #                  lg@o+5, sr@o+6, tr@o+7, lr@o+8, vac@o+9, dep@o+10,
+            #                  mi@o+11, lf@o+12, lt@o+13
+            sa_display = set_aside(ut)
+            rname = str(row[o+2] or '').strip() if len(row)>o+2 else ''
+            sq    = row[o+3]  if len(row)>o+3  else None
+            mr    = row[o+4]  if len(row)>o+4  else None
+            lg    = row[o+5]  if len(row)>o+5  else None
+            sr    = row[o+6]  if len(row)>o+6  else None
+            tr    = row[o+7]  if len(row)>o+7  else None
+            lr    = row[o+8]  if len(row)>o+8  else None
+            vac_r = row[o+9]  if len(row)>o+9  else None
+            dep   = row[o+10] if len(row)>o+10 else None
+            mi    = row[o+11] if len(row)>o+11 else None
+            lf    = row[o+12] if len(row)>o+12 else None
+            lt    = row[o+13] if len(row)>o+13 else None
+
+        isvac = rname.strip().upper() in ('VACANT',' VACANT') or not rname.strip()
 
         def sc(col,val,h='left',fmt=None):
             cell=ws.cell(rn,col); cell.value=val; cell.font=gfont(color=fc); cell.fill=gfill(WHITE)
@@ -387,7 +423,7 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
 
         sc(1,unit)
         sc(2,ut)
-        sc(3,set_aside(ut),'center')
+        sc(3,sa_display,'center')
         sc(4,' VACANT' if isvac else rname)
         sc(5,sq or 0,'center','#,##0')
         sc(6,mr or 0,'right','#,##0.00')
@@ -440,21 +476,28 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
     occ_sq=occ_mr=occ_sr=occ_tr=occ_dep=0; occ_cnt=0
     vac_sq=vac_mr=0; vac_cnt=len(V)
     for row,o in O:
-        try: occ_sq+=float(row[o+3] or 0)
+        sq_idx  = o+5 if is_st_format else o+3
+        mr_idx  = o+6 if is_st_format else o+4
+        sr_idx  = o+8 if is_st_format else o+6
+        tr_idx  = o+9 if is_st_format else o+7
+        dep_idx = o+12 if is_st_format else o+10
+        try: occ_sq+=float(row[sq_idx] or 0)
         except: pass
-        try: occ_mr+=float(str(row[o+4] or 0).replace(',',''))
+        try: occ_mr+=float(str(row[mr_idx] or 0).replace(',',''))
         except: pass
-        try: occ_sr+=float(str(row[o+6] or 0).replace(',',''))
+        try: occ_sr+=float(str(row[sr_idx] or 0).replace(',',''))
         except: pass
-        try: occ_tr+=float(str(row[o+7] or 0).replace(',',''))
+        try: occ_tr+=float(str(row[tr_idx] or 0).replace(',',''))
         except: pass
-        try: occ_dep+=float(str(row[o+10] or 0).replace(',',''))
+        try: occ_dep+=float(str(row[dep_idx] or 0).replace(',',''))
         except: pass
         occ_cnt+=1
     for row,o in V:
-        try: vac_sq+=float(row[o+3] or 0)
+        sq_idx = o+5 if is_st_format else o+3
+        mr_idx = o+6 if is_st_format else o+4
+        try: vac_sq+=float(row[sq_idx] or 0)
         except: pass
-        try: vac_mr+=float(str(row[o+4] or 0).replace(',',''))
+        try: vac_mr+=float(str(row[mr_idx] or 0).replace(',',''))
         except: pass
     tot_sq=occ_sq+vac_sq; tot_mr=occ_mr+vac_mr; tot_cnt=occ_cnt+vac_cnt
 
@@ -498,7 +541,6 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
 
 def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar_ws=None, tar_total=0, sar_total=0, rr_ws=None):
     total_units = get_total_units(prop)
-
     ws_name=next((n for n in wb_ro.sheetnames if 'weekly summary' in n.lower()),None)
     if not ws_name: return
     ws_src=wb_ro[ws_name]
@@ -507,14 +549,10 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
         for cell in row:
             if cell.value is not None:
                 src_vals[(cell.row,cell.column)]=cell.value
-
     if ws_name in wb_out.sheetnames: del wb_out[ws_name]
     ws=wb_out.create_sheet(ws_name)
-
     f9=gfont(sz=9); f9b=gfont(bold=True,sz=9)
-    NTV_BLUE='FFBDD7EE'
-    HDR_BLUE='FFB8CCE4'
-
+    NTV_BLUE='FFBDD7EE'; HDR_BLUE='FFB8CCE4'
     def cell(r,c,val=None,bg=None,bold=False,fmt=None,h='left',bdr=None,wrap=False):
         cell=ws.cell(r,c)
         if val is not None: cell.value=val
@@ -524,69 +562,40 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
         if fmt: cell.number_format=fmt
         if bdr: cell.border=bdr
         return cell
-
     AB=bblack()
-
     for r in range(1,4):
         for c in range(2,8):
-            ws.cell(r,c).fill=gfill(HDR_BLUE)
-            ws.cell(r,c).font=f9b
+            ws.cell(r,c).fill=gfill(HDR_BLUE); ws.cell(r,c).font=f9b
             ws.cell(r,c).alignment=galign('center')
-            ws.cell(r,c).border=Border(
-                top=T if r==1 else None,
-                bottom=T if r==3 else None,
-                left=T if c==2 else None,
-                right=T if c==7 else None
-            )
+            ws.cell(r,c).border=Border(top=T if r==1 else None,bottom=T if r==3 else None,left=T if c==2 else None,right=T if c==7 else None)
     ws.cell(1,2).value=src_vals.get((1,2), prop.split('(')[0].strip())
     ws.cell(2,2).value=src_vals.get((2,2),'Occupancy & Delinquency Summary')
-    ws.cell(3,2).value=date
-    ws.cell(3,2).fill=gfill(BLUE_IN)
+    ws.cell(3,2).value=date; ws.cell(3,2).fill=gfill(BLUE_IN)
     for r in range(1,4): ws.merge_cells(start_row=r,start_column=2,end_row=r,end_column=7)
-
     for r in range(4,23):
         for c in range(2,8):
-            ws.cell(r,c).border=AB
-            ws.cell(r,c).font=f9
-
-    # Row 5 — Total Units (dynamic per property)
-    cell(5,2,total_units,h='center')
-    cell(5,3,'=B5/$B$5',fmt='0.00%',h='center')
-    cell(5,4,'Total Units',h='left')
-
-    occ=[
-        (6,'Subtract',False,'Physically Vacant'),
-        (7,'Add',True,'Applications - Approved @ KG'),
-        (8,'Add',True,'Applications - Pending Not Approved @ KG'),
-        (9,'Add',True,'Applications - Site Processing - Not Sent to KG'),
-        (10,'Subtract',False,'Notices to Vacate Not at Legal'),
-        (11,'Subtract',False,'Notices to Vacate @ Legal'),
-        (12,None,False,'NET LEASED '),
-    ]
+            ws.cell(r,c).border=AB; ws.cell(r,c).font=f9
+    cell(5,2,total_units,h='center'); cell(5,3,'=B5/$B$5',fmt='0.00%',h='center'); cell(5,4,'Total Units',h='left')
+    occ=[(6,'Subtract',False,'Physically Vacant'),(7,'Add',True,'Applications - Approved @ KG'),(8,'Add',True,'Applications - Pending Not Approved @ KG'),(9,'Add',True,'Applications - Site Processing - Not Sent to KG'),(10,'Subtract',False,'Notices to Vacate Not at Legal'),(11,'Subtract',False,'Notices to Vacate @ Legal'),(12,None,False,'NET LEASED ')]
     for r,lbl,is_blue,desc in occ:
         if lbl: ws.cell(r,1).value=lbl; ws.cell(r,1).font=f9; ws.cell(r,1).alignment=galign('center')
-        if r==12:
-            ws.cell(r,2).value='=B5+B6+B7+B8+B9+B10+B11'
+        if r==12: ws.cell(r,2).value='=B5+B6+B7+B8+B9+B10+B11'
         else:
             if is_blue: ws.cell(r,2).fill=gfill(BLUE_IN)
         ws.cell(r,2).font=f9; ws.cell(r,2).alignment=galign('center')
         ws.cell(r,3).value=f'=B{r}/$B$5'; ws.cell(r,3).font=f9; ws.cell(r,3).number_format='0.00%'; ws.cell(r,3).alignment=galign('center')
         ws.cell(r,4).value=desc; ws.cell(r,4).font=f9; ws.cell(r,4).alignment=galign('left')
-
     for r in [6,10,11]: ws.cell(r,2).fill=gfill(BLUE_IN)
-
     ws.cell(14,2).fill=gfill(BLUE_IN); ws.cell(14,2).font=f9; ws.cell(14,2).alignment=galign('center'); ws.cell(14,2).border=AB
     ws.cell(14,3).value='=B14/B5'; ws.cell(14,3).font=f9; ws.cell(14,3).number_format='0.00%'; ws.cell(14,3).alignment=galign('center'); ws.cell(14,3).border=AB
     ws.cell(14,4).value='# of tenants owing prev. full month rent, including'; ws.cell(14,4).font=f9; ws.cell(14,4).alignment=galign('left'); ws.cell(14,4).border=AB
     ws.cell(14,5).border=AB; ws.cell(14,5).font=f9
     ws.cell(14,6).font=f9; ws.cell(14,6).alignment=galign('center'); ws.cell(14,6).border=AB
     ws.cell(14,7).value='@ legal'; ws.cell(14,7).font=f9; ws.cell(14,7).border=AB
-
     ws.cell(16,2).font=f9; ws.cell(16,2).alignment=galign('center'); ws.cell(16,2).border=AB
     ws.cell(16,3).fill=gfill(BLUE_IN); ws.cell(16,3).font=f9; ws.cell(16,3).alignment=galign('center'); ws.cell(16,3).number_format='#,##0_);(#,##0)'; ws.cell(16,3).border=AB
     ws.cell(16,4).value='# Physically Occupied and Total Leased Rent'; ws.cell(16,4).font=f9; ws.cell(16,4).alignment=galign('left'); ws.cell(16,4).border=AB
     for c in [5,6,7]: ws.cell(16,c).border=AB; ws.cell(16,c).font=f9
-
     AR_FMT='_([$$-409]* #,##0.00_);_([$$-409]* \\(#,##0.00\\);_([$$-409]* "-"??_);_(@_)'
     for r,desc in [(18,'Tenant Accounts Receivable (AR)'),(19,'Subsidy Accounts Receivable (AR) '),(20,'Total  AR')]:
         for c in range(2,8): ws.cell(r,c).border=AB; ws.cell(r,c).font=f9
@@ -595,33 +604,24 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
         ws.cell(r,4).value=desc; ws.cell(r,4).alignment=Alignment(horizontal='left',vertical='center',wrap_text=False)
         if r in [18,19]: ws.cell(r,5).value=f'=C{r}/C16'; ws.cell(r,5).number_format='0.00%'; ws.cell(r,5).alignment=Alignment(horizontal='right',vertical='center',wrap_text=False)
         if r==20: ws.cell(r,5).value='=SUM(E18:E19)'; ws.cell(r,5).number_format='0.00%'; ws.cell(r,5).alignment=Alignment(horizontal='right',vertical='center',wrap_text=False)
-
     ws.cell(20,3).value='=C18+C19'
-
     ws.cell(22,2).value='* AR to include current month delinquency beginning 10th of each month'
     for c in range(2,8): ws.cell(22,c).border=AB; ws.cell(22,c).font=f9
-
     ws.cell(25,2).value='NTV'; ws.cell(25,2).font=f9b; ws.cell(25,2).fill=gfill(NTV_BLUE)
-    ws.cell(25,2).border=Border(top=T,bottom=T,left=T,right=T)
-    ws.cell(25,3).border=Border(top=T,bottom=T,right=T)
+    ws.cell(25,2).border=Border(top=T,bottom=T,left=T,right=T); ws.cell(25,3).border=Border(top=T,bottom=T,right=T)
     ws.merge_cells('B25:C25')
-
     ws.cell(26,2).value='Unit #'; ws.cell(26,2).font=f9b; ws.cell(26,2).fill=gfill(NTV_BLUE)
     ws.cell(26,2).border=Border(bottom=T,left=T,right=T); ws.cell(26,2).alignment=galign('center')
     ws.cell(26,3).value='Move-in year'; ws.cell(26,3).font=f9b; ws.cell(26,3).fill=gfill(NTV_BLUE)
     ws.cell(26,3).border=Border(bottom=T,left=T,right=T); ws.cell(26,3).alignment=galign('center')
-
     for r in range(27,50):
         v2=src_vals.get((r,2)); v3=src_vals.get((r,3))
         ws.cell(r,2).border=AB; ws.cell(r,2).font=f9
         ws.cell(r,3).border=AB; ws.cell(r,3).font=f9
         if v2: ws.cell(r,2).value=v2; ws.cell(r,2).alignment=galign('left')
         if v3:
-            ws.cell(r,3).value=v3
-            ws.cell(r,3).number_format='MM/DD/YY'
+            ws.cell(r,3).value=v3; ws.cell(r,3).number_format='MM/DD/YY'
             ws.cell(r,3).alignment=Alignment(horizontal='center',vertical='center',wrap_text=False)
-
-    # ── COMPUTE AND SET INPUT CELLS ───────────────────────────────────────────
     ws['B3']=date
     occ_count=0
     if ua_ws:
@@ -640,7 +640,6 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
                 except: pass
         ws['B6']=-V; ws['B7']=kA; ws['B8']=kP; ws['B9']=sP; ws['B10']=-N
         ws.cell(16,2).value=occ_count
-        # Use Rent Roll Lease Rent col J total if available, else fall back to UA
         if rr_ws:
             rr_leased=0
             for rr_r in range(6,rr_ws.max_row+1):
@@ -652,7 +651,6 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
             ws['C16']=rr_leased
         else:
             ws['C16']=leased
-
     if tar_ws:
         ev=b14=f14=0
         for r in range(7,tar_ws.max_row+1):
@@ -665,7 +663,6 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
                 if p31+p61+p90>0 and cur>0 and p31+p61+p90>=cur: b14+=1
             except: pass
         ws['B11']=-ev; ws['B14']=b14; ws['F14']=f14
-
     def getT(aw):
         if not aw: return 0
         for r in range(7,aw.max_row+1):
@@ -675,15 +672,13 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
         return 0
     if tar_total==0 and tar_ws: tar_total=getT(tar_ws)
     if sar_total==0 and sar_ws: sar_total=getT(sar_ws)
-    ws['C18']=tar_total
-    ws['C19']=sar_total
+    ws['C18']=tar_total; ws['C19']=sar_total
     ws.cell(20,3).value=tar_total+sar_total
     if ws['C16'].value and float(ws['C16'].value or 0)>0:
         leased_val=float(ws['C16'].value)
         ws.cell(18,5).value=tar_total/leased_val if leased_val else 0
         ws.cell(19,5).value=sar_total/leased_val if leased_val else 0
         ws.cell(20,5).value=(tar_total+sar_total)/leased_val if leased_val else 0
-
     for col,w in {'A':16.57,'B':14.43,'C':15.43,'D':41.43,'E':9.29,'F':6.0,'G':7.86}.items():
         ws.column_dimensions[col].width=w
     for r,h in [(1,12),(2,12),(3,12),(4,12),(5,12),(6,12),(7,15.75),(8,15.75),(9,15.75),(10,15.75),(11,15.75),(12,15.75),(13,15.75),(14,12),(15,15.75),(16,16.5),(17,15.75),(18,12),(19,15.75),(20,12),(21,12),(22,12),(25,16.5)]:
@@ -691,7 +686,7 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.7'})
+    return jsonify({'status':'ok','version':'9.8'})
 
 @app.route('/')
 def index():
@@ -713,56 +708,38 @@ def format_report():
         pSAR=get_notes(wb_ro,'Sub AR')
         pSAR.update(get_notes(wb_ro,'SUB AR'))
         wb_out=openpyxl.Workbook(); wb_out.remove(wb_out.active)
-
         ua_ws=tar_ws=sar_ws=None
         tar_total=sar_total=0
-
         ua_f=request.files.get('ua')
         if ua_f: ua_ws,*_=fmt_ua(wb_out,ua_f.read(),date,prop)
-
         tar_f=request.files.get('tar')
         if tar_f:
             tar_ws,ev,cu,no,pos_end,data_start=fmt_ar(wb_out,tar_f.read(),date,pTAR,False)
             for r in range(data_start,pos_end+1):
                 try: tar_total+=float(tar_ws.cell(r,5).value or 0)
                 except: pass
-
         sar_f=request.files.get('sar')
         if sar_f:
             sar_ws,ev,cu,no,pos_end,data_start=fmt_ar(wb_out,sar_f.read(),date,pSAR,True)
             for r in range(data_start,pos_end+1):
                 try: sar_total+=float(sar_ws.cell(r,5).value or 0)
                 except: pass
-
         rr_ws=None
         rr_f=request.files.get('rr')
         if rr_f: rr_ws,*_=fmt_rr(wb_out,rr_f.read(),date,prop)
-
         build_weekly_summary(wb_out,wb_ro,date,prop,ua_ws,tar_ws,sar_ws,tar_total,sar_total,rr_ws)
         wb_ro.close()
-
-        # Reorder tabs: Weekly Summary → Unit Availability → Rent Roll → Tenant AR → SUB AR
-        # Match by prefix to handle trailing spaces or slight name differences
         def find_tab(names, prefix):
             return next((n for n in names if n.strip().lower().startswith(prefix.lower())), None)
-
         current=list(wb_out.sheetnames)
-        ws_tab=find_tab(current,'weekly summary')
-        ua_tab=find_tab(current,'unit availability')
-        rr_tab=find_tab(current,'rent roll')
-        tar_tab=find_tab(current,'tenant ar')
-        sar_tab=find_tab(current,'sub ar')
+        ws_tab=find_tab(current,'weekly summary'); ua_tab=find_tab(current,'unit availability')
+        rr_tab=find_tab(current,'rent roll'); tar_tab=find_tab(current,'tenant ar'); sar_tab=find_tab(current,'sub ar')
         desired=[t for t in [ws_tab,ua_tab,rr_tab,tar_tab,sar_tab] if t]
         remaining=[t for t in current if t not in desired]
         ordered=desired+remaining
         for target_i,name in enumerate(ordered):
-            current=list(wb_out.sheetnames)
-            current_i=current.index(name)
-            if current_i!=target_i:
-                wb_out.move_sheet(name,offset=target_i-current_i)
-
-        # Save to a temp buffer first, then patch the XML to remove any
-        # circular reference cache that causes Excel's warning on open
+            current=list(wb_out.sheetnames); current_i=current.index(name)
+            if current_i!=target_i: wb_out.move_sheet(name,offset=target_i-current_i)
         import zipfile, re as _re
         raw=io.BytesIO(); wb_out.save(raw); raw.seek(0)
         patched=io.BytesIO()
@@ -830,7 +807,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.7</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.8</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
