@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.8 — Rent Roll ST fix + AR credits/prepays grouping"""
+"""Weekly Report Formatter v9.11 — Weekly Traffic tab added"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -539,7 +539,179 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
     ws.freeze_panes='A6'
     return ws, len(V), len(O)
 
-def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar_ws=None, tar_total=0, sar_total=0, rr_ws=None):
+TRAFFIC_SOURCES=[
+    'Apartment List','Apartment Ratings','Brochure/Flyer','Google','Craigslist',
+    'Drive-by','Other','GeoTargeting','Facebook','Google My Business','Locator',
+    'Organic Social','CoStar','Paid Search','Paid Social','Property Website',
+    'Referral - Current Resident','Referral - Former Resident','Remarketing',
+    'Rent.','RentPath','Yelp','Zillow','Zumper'
+]
+
+def fmt_traffic(wb_out, raw_bytes, date, prop):
+    import csv, io as _io
+    # Parse the uploaded CSV
+    text = raw_bytes.decode('utf-8-sig')
+    reader = csv.DictReader(_io.StringIO(text))
+    src_data = {}
+    for row in reader:
+        src = str(row.get('Source','') or '').strip()
+        if not src or src.lower() == 'total': continue
+        def iv(k):
+            try: return int(str(row.get(k,0) or 0).replace(',',''))
+            except: return 0
+        src_data[src] = {
+            'plan': str(row.get('Plan','') or '').strip(),
+            'leads': iv('Leads'), 'prospects': iv('Prospects'),
+            'visits': iv('Visits'), 'leases': iv('Leases'),
+            'applications': iv('Applications')
+        }
+
+    # Derive date range label from date (MM.DD.YY) — find the Monday of that week
+    import datetime as _dt
+    tab = f'Weekly Traffic {date}'
+    if tab in wb_out.sheetnames: del wb_out[tab]
+    ws = wb_out.create_sheet(tab)
+
+    # Parse date to build Mon-Sun range label
+    try:
+        d = _dt.datetime.strptime(date, '%m.%d.%y')
+        mon = d - _dt.timedelta(days=d.weekday())
+        sun = mon + _dt.timedelta(days=6)
+        date_range = f"{mon.month}/{mon.day}/{mon.year}-{sun.month}/{sun.day}/{sun.year}"
+    except:
+        date_range = date
+
+    MC = 7  # Source, Plan, Leads, Prospects, Visits, Leases, Applications
+
+    # Title rows (green, rows 1-3)
+    titles = [
+        ('Weekly Traffic', True),
+        (prop, False),
+        (date_range, True),
+    ]
+    for ti, (txt, bold) in enumerate(titles):
+        r = ti + 1
+        for c in range(1, MC+1):
+            ws.cell(r,c).fill = gfill(GREEN)
+            ws.cell(r,c).font = gfont(bold=bold)
+            ws.cell(r,c).alignment = Alignment(horizontal='center', vertical='center')
+        ws.cell(r,1).value = txt
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=MC)
+        ws.row_dimensions[r].height = 15.0
+
+    # Header row (row 4)
+    hdrs = ['Source','Plan','Leads','Prospects','Visits','Leases','Applications']
+    for c, h in enumerate(hdrs, 1):
+        cell = ws.cell(4, c)
+        cell.value = h; cell.font = gfont(bold=True); cell.fill = gfill(GRAY_HDR)
+        cell.alignment = Alignment(horizontal='center' if c > 1 else 'left', vertical='center')
+        cell.border = bblack()
+    ws.row_dimensions[4].height = 15.0
+
+    # Data rows (rows 5+)
+    rn = 5
+    for src in TRAFFIC_SOURCES:
+        d = src_data.get(src, {'plan':'','leads':0,'prospects':0,'visits':0,'leases':0,'applications':0})
+        ws.cell(rn,1).value = src
+        ws.cell(rn,2).value = d['plan'] or None
+        for ci, key in enumerate(['leads','prospects','visits','leases','applications'], 3):
+            ws.cell(rn,ci).value = d[key]
+            ws.cell(rn,ci).alignment = Alignment(horizontal='center', vertical='center')
+            ws.cell(rn,ci).number_format = '0'
+        for c in range(1, MC+1):
+            ws.cell(rn,c).font = gfont()
+            ws.cell(rn,c).fill = gfill(WHITE)
+            ws.cell(rn,c).border = Border(top=TG, bottom=TG, left=TG, right=TG)
+        ws.cell(rn,1).alignment = Alignment(horizontal='left', vertical='center')
+        ws.cell(rn,2).alignment = Alignment(horizontal='left', vertical='center')
+        ws.row_dimensions[rn].height = 15.0
+        rn += 1
+
+    # Total row
+    total_row = rn
+    ws.cell(rn,1).value = 'Total'
+    ws.cell(rn,1).font = gfont(bold=True)
+    ws.cell(rn,1).fill = gfill(GRAY_HDR)
+    ws.cell(rn,1).border = bblack()
+    ws.cell(rn,2).fill = gfill(GRAY_HDR); ws.cell(rn,2).border = bblack()
+    data_start = 5
+    for c in range(3, MC+1):
+        cell = ws.cell(rn, c)
+        cell.value = f'=SUM({get_column_letter(c)}{data_start}:{get_column_letter(c)}{rn-1})'
+        cell.font = gfont(bold=True); cell.fill = gfill(GRAY_HDR)
+        cell.border = bblack()
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+        cell.number_format = '0'
+    ws.row_dimensions[rn].height = 15.0
+
+    # Column widths
+    for col, w in {'A':28,'B':10,'C':10,'D':12,'E':10,'F':10,'G':14}.items():
+        ws.column_dimensions[col].width = w
+
+    ws.freeze_panes = 'A5'
+    return ws
+
+def parse_traffic(raw_bytes, date):
+    import csv, io as _io
+    rows = []
+    try:
+        text = raw_bytes.decode('utf-8-sig')
+        reader = csv.reader(_io.StringIO(text))
+        rows = list(reader)
+    except Exception:
+        try:
+            wb_r = openpyxl.load_workbook(io.BytesIO(raw_bytes), read_only=True, data_only=True)
+            for r in wb_r.active.iter_rows(values_only=True):
+                rows.append([str(c or '') for c in r])
+            wb_r.close()
+        except Exception:
+            return None
+
+    start_date = end_date = ''
+    for row in rows[:10]:
+        for i, cell in enumerate(row):
+            if 'startdate' in str(cell).lower().replace(' ','') and i+1 < len(row):
+                start_date = str(row[i+1]).strip()
+            if 'enddate' in str(cell).lower().replace(' ','') and i+1 < len(row):
+                end_date = str(row[i+1]).strip()
+    def fmt_d(d):
+        try:
+            from datetime import datetime
+            return datetime.strptime(d, '%Y-%m-%d').strftime('%-m/%-d/%Y')
+        except: return d
+    date_range = f'{fmt_d(start_date)} - {fmt_d(end_date)}' if start_date and end_date else date
+
+    hi = next((i for i,r in enumerate(rows) if r and 'source' in str(r[0]).lower() and any('lead' in str(c).lower() for c in r)), 0)
+    hdr = rows[hi] if rows else []
+    def ci(name):
+        for i,h in enumerate(hdr):
+            if name.lower() in str(h).lower(): return i
+        return -1
+    c_leads=ci('lead'); c_pros=ci('prospect'); c_vis=ci('visit'); c_lease=ci('lease'); c_app=ci('applic')
+
+    SOURCES = [
+        'Apartment List','Apartment Ratings','Brochure/Flyer','Google','Craigslist',
+        'Drive-by','Other','GeoTargeting','Facebook','Google My Business','Locator',
+        'Organic Social','CoStar','Paid Search','Paid Social','Property Website',
+        'Referral - Current Resident','Referral - Former Resident','Remarketing',
+        'Rent.','RentPath','Yelp','Zillow','Zumper'
+    ]
+    data = {}
+    for row in rows[hi+1:]:
+        if not row or not str(row[0]).strip(): continue
+        src = str(row[0]).strip()
+        if src not in SOURCES: continue
+        def gv(idx):
+            if idx < 0 or idx >= len(row): return 0
+            v = str(row[idx]).strip().replace(',','')
+            try: return int(float(v))
+            except: return 0
+        data[src] = [gv(c_leads), gv(c_pros), gv(c_vis), gv(c_lease), gv(c_app)]
+
+    active = [(src, data[src]) for src in SOURCES if src in data and any(v!=0 for v in data[src])]
+    return {'date_range': date_range, 'rows': active}
+
+def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar_ws=None, tar_total=0, sar_total=0, rr_ws=None, traffic_data=None):
     total_units = get_total_units(prop)
     ws_name=next((n for n in wb_ro.sheetnames if 'weekly summary' in n.lower()),None)
     if not ws_name: return
@@ -679,14 +851,67 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
         ws.cell(18,5).value=tar_total/leased_val if leased_val else 0
         ws.cell(19,5).value=sar_total/leased_val if leased_val else 0
         ws.cell(20,5).value=(tar_total+sar_total)/leased_val if leased_val else 0
-    for col,w in {'A':16.57,'B':14.43,'C':15.43,'D':41.43,'E':9.29,'F':6.0,'G':7.86}.items():
+    # ── WEEKLY TRAFFIC TABLE (cols E-K, rows 25+) ────────────────────────────
+    if traffic_data:
+        TR_COL = 5  # starts at col E
+        TR_COLS = 6  # Source, Leads, Prospects, Visits, Leases, Applications
+        tr_hdrs = ['Source','Leads','Prospects','Visits','Leases','Applications']
+        active_sources = [(src, vals) for src, vals in traffic_data['rows'] if any(v!=0 for v in vals)]
+        date_range = traffic_data.get('date_range', date)
+
+        # Title row 25 (same row as NTV header)
+        for c in range(TR_COL, TR_COL+TR_COLS):
+            ws.cell(25,c).fill=gfill(HDR_BLUE); ws.cell(25,c).font=f9b
+            ws.cell(25,c).alignment=galign('center')
+            ws.cell(25,c).border=Border(top=T,bottom=T,left=T if c==TR_COL else None,right=T if c==TR_COL+TR_COLS-1 else None)
+        ws.cell(25,TR_COL).value=f'Weekly Traffic  " {date_range} "'
+        ws.merge_cells(start_row=25,start_column=TR_COL,end_row=25,end_column=TR_COL+TR_COLS-1)
+
+        # Header row 26
+        for i,h in enumerate(tr_hdrs):
+            c = TR_COL+i
+            ws.cell(26,c).value=h; ws.cell(26,c).font=f9b
+            ws.cell(26,c).fill=gfill(GRAY_HDR)
+            ws.cell(26,c).alignment=Alignment(horizontal='center' if i>0 else 'left',vertical='center')
+            ws.cell(26,c).border=bblack()
+
+        # Data rows starting at 27
+        tr_rn = 27
+        for src, vals in active_sources:
+            ws.cell(tr_rn,TR_COL).value=src; ws.cell(tr_rn,TR_COL).font=f9
+            ws.cell(tr_rn,TR_COL).fill=gfill(WHITE)
+            ws.cell(tr_rn,TR_COL).alignment=Alignment(horizontal='left',vertical='center')
+            ws.cell(tr_rn,TR_COL).border=bgray()
+            for i,v in enumerate(vals):
+                c=TR_COL+1+i
+                ws.cell(tr_rn,c).value=v; ws.cell(tr_rn,c).font=f9
+                ws.cell(tr_rn,c).fill=gfill(WHITE)
+                ws.cell(tr_rn,c).alignment=Alignment(horizontal='center',vertical='center')
+                ws.cell(tr_rn,c).border=bgray(); ws.cell(tr_rn,c).number_format='0'
+            ws.row_dimensions[tr_rn].height=15.0; tr_rn+=1
+
+        # Total row
+        tr_data_start=27; tr_data_end=tr_rn-1
+        ws.cell(tr_rn,TR_COL).value='Total'; ws.cell(tr_rn,TR_COL).font=f9b
+        ws.cell(tr_rn,TR_COL).fill=gfill(GRAY_HDR)
+        ws.cell(tr_rn,TR_COL).alignment=Alignment(horizontal='center',vertical='center')
+        ws.cell(tr_rn,TR_COL).border=bblack()
+        for i in range(1,TR_COLS):
+            c=TR_COL+i
+            ws.cell(tr_rn,c).value=f'=SUM({get_column_letter(c)}{tr_data_start}:{get_column_letter(c)}{tr_data_end})'
+            ws.cell(tr_rn,c).font=f9b; ws.cell(tr_rn,c).fill=gfill(GRAY_HDR)
+            ws.cell(tr_rn,c).alignment=Alignment(horizontal='center',vertical='center')
+            ws.cell(tr_rn,c).border=bblack(); ws.cell(tr_rn,c).number_format='0'
+        ws.row_dimensions[tr_rn].height=15.0
+
+    for col,w in {'A':16.57,'B':14.43,'C':15.43,'D':41.43,'E':22,'F':7,'G':10,'H':7,'I':7,'J':10}.items():
         ws.column_dimensions[col].width=w
     for r,h in [(1,12),(2,12),(3,12),(4,12),(5,12),(6,12),(7,15.75),(8,15.75),(9,15.75),(10,15.75),(11,15.75),(12,15.75),(13,15.75),(14,12),(15,15.75),(16,16.5),(17,15.75),(18,12),(19,15.75),(20,12),(21,12),(22,12),(25,16.5)]:
         ws.row_dimensions[r].height=h
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.8'})
+    return jsonify({'status':'ok','version':'9.9'})
 
 @app.route('/')
 def index():
@@ -727,7 +952,10 @@ def format_report():
         rr_ws=None
         rr_f=request.files.get('rr')
         if rr_f: rr_ws,*_=fmt_rr(wb_out,rr_f.read(),date,prop)
-        build_weekly_summary(wb_out,wb_ro,date,prop,ua_ws,tar_ws,sar_ws,tar_total,sar_total,rr_ws)
+        traffic_data=None
+        tr_f=request.files.get('tr')
+        if tr_f: traffic_data=parse_traffic(tr_f.read(),date)
+        build_weekly_summary(wb_out,wb_ro,date,prop,ua_ws,tar_ws,sar_ws,tar_total,sar_total,rr_ws,traffic_data)
         wb_ro.close()
         def find_tab(names, prefix):
             return next((n for n in names if n.strip().lower().startswith(prefix.lower())), None)
@@ -807,7 +1035,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.8</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.11</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
@@ -822,6 +1050,8 @@ select:focus,input:focus{border-color:var(--g);}
       <div class="slot" id="s-tar"><input type="file" id="f-tar" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#F28E86;"></div><span class="sl">Tenant AR</span></div><div class="ss">Analytics &rarr; Receivable Aging (Excl. HUD)</div><div class="sn2" id="n-tar">Click or drag file here</div></div>
       <div class="slot" id="s-sar"><input type="file" id="f-sar" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#8CB5F9;"></div><span class="sl">Subsidy AR</span></div><div class="ss">Analytics &rarr; Receivable Aging (HUD Only)</div><div class="sn2" id="n-sar">Click or drag file here</div></div>
       <div class="slot" id="s-rr"><input type="file" id="f-rr" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#C4A0F5;"></div><span class="sl">Rent Roll</span></div><div class="ss">Onsite &rarr; Analytics &rarr; Rent Roll</div><div class="sn2" id="n-rr">Click or drag file here</div></div>
+      <div class="slot full" id="s-tr"><input type="file" id="f-tr" accept=".xlsx,.xls,.xlsm,.csv"/><div class="sh"><div class="dot" style="background:#F5C842;"></div><span class="sl">Weekly Traffic</span></div><div class="ss">Ad Spend &amp; Traffic Report (CSV or Excel)</div><div class="sn2" id="n-tr">Click or drag file here</div></div>
+      <div class="slot" id="s-tr"><input type="file" id="f-tr" accept=".xlsx,.xls,.xlsm,.csv"/><div class="sh"><div class="dot" style="background:#F5A623;"></div><span class="sl">Weekly Traffic</span></div><div class="ss">Ad Spend &rarr; Export CSV</div><div class="sn2" id="n-tr">Click or drag file here</div></div>
     </div>
   </div>
   <div class="card"><div class="sn">STEP 04</div><div class="ct">Format &amp; Download</div><div class="cd">Formats all reports with exact colors, structure, and formulas. Downloads the final workbook.</div>
@@ -832,7 +1062,7 @@ select:focus,input:focus{border-color:var(--g);}
   </div>
 </div>
 <script>
-["wb","ua","tar","sar","rr"].forEach(k=>{
+["wb","ua","tar","sar","rr","tr"].forEach(k=>{
   document.getElementById("f-"+k).addEventListener("change",function(){
     if(this.files[0]){document.getElementById("s-"+k).classList.add("on");document.getElementById("n-"+k).textContent="✓ "+this.files[0].name;}
   });
@@ -848,7 +1078,7 @@ async function run(){
   if(!document.getElementById("f-wb").files[0]){alert("Please upload the working workbook.");btn.disabled=false;return;}
   const form=new FormData();
   form.append("date",date);form.append("prop",prop);
-  ["wb","ua","tar","sar","rr"].forEach(k=>{const f=document.getElementById("f-"+k).files[0];if(f)form.append(k,f);});
+  ["wb","ua","tar","sar","rr","tr"].forEach(k=>{const f=document.getElementById("f-"+k).files[0];if(f)form.append(k,f);});
   L("Uploading and formatting...");P(20);
   try{
     const resp=await fetch("/format",{method:"POST",body:form});
