@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.14 — Corrected Village at First/ST column order (SqFt before ResID)"""
+"""Weekly Report Formatter v9.15 — Village at First RR uses simple 13-col format (no set-aside/sub/tenant cols)"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -317,54 +317,31 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         if re.match(r'^\d{3,5}$',v0): rr_offset=0; unit_pat=r'^\d{3,5}'; break
         if re.match(r'^\d{3,5}$',v1): rr_offset=1; unit_pat=r'^\d{3,5}'; break
 
-    # Detect if this export has a "Unit Set Aside" column (Village at First / Santa Teresa format).
-    # These exports have: Unit, Unit Type, Unit Set Aside (%), flag col, Resident ID, Resident Name, ...
-    # vs Madrone: Unit, Unit Type, Resident Name, ...
-    # Detection: col rr_offset+2 in first data row is a percentage / numeric set-aside value.
-    is_st_format = False
+    # Detect format type by checking col rr_offset+2 of first data row:
+    #
+    # VILLAGE AT FIRST format (simple 13-col, no set-aside/sub/tenant cols):
+    #   o+0 Unit, o+1 UnitType, o+2 SqFt, o+3 ResidentID, o+4 ResidentName,
+    #   o+5 MarketRent, o+6 ActualRent, o+7 ResDeposit, o+8 OtherDeposit,
+    #   o+9 MoveIn, o+10 LeaseExpiration, o+11 MoveOut, o+12 Balance
+    #   Detection: col o+2 is a plain integer (sq ft like 875, 1069...)
+    #
+    # MADRONE format (no set-aside col):
+    #   o+0 Unit, o+1 UnitType, o+2 ResidentName, o+3 SqFt, o+4 MarketRent,
+    #   o+5 LossGain, o+6 SubRent, o+7 TenantRent, o+8 LeaseRent,
+    #   o+9 Vacancy, o+10 Deposit, o+11 MoveIn, o+12 LeaseFrom, o+13 LeaseTo
+    #   Detection: col o+2 is a text name string
+
+    is_vaf_format = False  # Village at First simple format
+    is_st_format = False   # Santa Teresa / set-aside format (future use)
     for row in rr[hi+1:]:
         if not row: continue
         unit_v = str(row[rr_offset] or '').strip()
         if not re.match(unit_pat, unit_v): continue
         col2_v = str(row[rr_offset+2] or '').strip()
-        if re.match(r'^\d{1,3}%?$', col2_v) or col2_v in ('30%','50%','60%','30','50','60'):
-            is_st_format = True
+        # If col2 is a plain integer (sq ft value), it's Village at First format
+        if re.match(r'^\d{3,5}$', col2_v):
+            is_vaf_format = True
         break
-
-    # Column layout for is_st_format (Village at First / Santa Teresa):
-    #   o+0  Unit
-    #   o+1  Unit Type
-    #   o+2  Unit Set Aside %
-    #   o+3  Flag/icon column (checkmark)
-    #   o+4  Sq Ft          ← comes BEFORE Resident ID
-    #   o+5  Resident ID
-    #   o+6  Resident Name
-    #   o+7  Market Rent
-    #   o+8  Loss/Gain to Lease
-    #   o+9  Sub Rent
-    #   o+10 Tenant Rent
-    #   o+11 Lease Rent
-    #   o+12 Vacancy
-    #   o+13 Deposit
-    #   o+14 Move In
-    #   o+15 Lease From
-    #   o+16 Lease To
-    #
-    # Column layout for Madrone (no set-aside col):
-    #   o+0  Unit
-    #   o+1  Unit Type
-    #   o+2  Resident Name
-    #   o+3  Sq Ft
-    #   o+4  Market Rent
-    #   o+5  Loss/Gain
-    #   o+6  Sub Rent
-    #   o+7  Tenant Rent
-    #   o+8  Lease Rent
-    #   o+9  Vacancy
-    #   o+10 Deposit
-    #   o+11 Move In
-    #   o+12 Lease From
-    #   o+13 Lease To
 
     V,O=[],[]
     for row in rr[hi+1:]:
@@ -373,7 +350,7 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         unit=str(row[rr_offset] or '').strip()
         if not re.match(unit_pat,unit): continue
         o=rr_offset
-        name_idx = o+6 if is_st_format else o+2
+        name_idx = o+4 if is_vaf_format else o+2
         rname=str(row[name_idx] or '').strip() if len(row)>name_idx else ''
         if rname.strip().upper() in ('VACANT',' VACANT') or not rname.strip(): V.append((row,o))
         else: O.append((row,o))
@@ -408,22 +385,23 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         unit=str(row[o] or '').strip()
         ut=str(row[o+1] or '').strip() if len(row)>o+1 else ''
 
-        if is_st_format:
-            sa_raw = row[o+2] if len(row)>o+2 else None
-            sa_display = set_aside_from_col(sa_raw)
-            # o+3 is flag col, o+4 is Sq Ft, o+5 is Resident ID, o+6 is Resident Name
-            rname = str(row[o+6] or '').strip() if len(row)>o+6 else ''
-            sq    = row[o+4]  if len(row)>o+4  else None
-            mr    = row[o+7]  if len(row)>o+7  else None
-            lg    = row[o+8]  if len(row)>o+8  else None
-            sr    = row[o+9]  if len(row)>o+9  else None
-            tr    = row[o+10] if len(row)>o+10 else None
-            lr    = row[o+11] if len(row)>o+11 else None
-            vac_r = row[o+12] if len(row)>o+12 else None
-            dep   = row[o+13] if len(row)>o+13 else None
-            mi    = row[o+14] if len(row)>o+14 else None
-            lf    = row[o+15] if len(row)>o+15 else None
-            lt    = row[o+16] if len(row)>o+16 else None
+        if is_vaf_format:
+            # Village at First: Unit, UnitType, SqFt, ResID, ResName,
+            #   MarketRent, ActualRent, ResDeposit, OtherDeposit,
+            #   MoveIn, LeaseExpiration, MoveOut, Balance
+            sa_display = set_aside(ut)  # decode from unit type code
+            rname = str(row[o+4] or '').strip() if len(row)>o+4 else ''
+            sq    = row[o+2]  if len(row)>o+2  else None
+            mr    = row[o+5]  if len(row)>o+5  else None
+            lg    = None  # not in this export
+            sr    = None  # no sub rent
+            tr    = row[o+6]  if len(row)>o+6  else None   # ActualRent → Tenant Rent
+            lr    = row[o+6]  if len(row)>o+6  else None   # same as actual
+            vac_r = None
+            dep   = row[o+7]  if len(row)>o+7  else None
+            mi    = row[o+9]  if len(row)>o+9  else None
+            lf    = row[o+9]  if len(row)>o+9  else None   # MoveIn as LeaseFrom
+            lt    = row[o+10] if len(row)>o+10 else None   # LeaseExpiration as LeaseTo
         else:
             sa_display = set_aside(ut)
             rname = str(row[o+2] or '').strip() if len(row)>o+2 else ''
@@ -501,16 +479,16 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
     occ_sq=occ_mr=occ_sr=occ_tr=occ_dep=0; occ_cnt=0
     vac_sq=vac_mr=0; vac_cnt=len(V)
     for row,o in O:
-        sq_idx  = o+4 if is_st_format else o+3
-        mr_idx  = o+7 if is_st_format else o+4
-        sr_idx  = o+9 if is_st_format else o+6
-        tr_idx  = o+10 if is_st_format else o+7
-        dep_idx = o+13 if is_st_format else o+10
+        sq_idx  = o+2 if is_vaf_format else o+3
+        mr_idx  = o+5 if is_vaf_format else o+4
+        sr_idx  = -1  if is_vaf_format else o+6
+        tr_idx  = o+6 if is_vaf_format else o+7
+        dep_idx = o+7 if is_vaf_format else o+10
         try: occ_sq+=float(row[sq_idx] or 0)
         except: pass
         try: occ_mr+=float(str(row[mr_idx] or 0).replace(',',''))
         except: pass
-        try: occ_sr+=float(str(row[sr_idx] or 0).replace(',',''))
+        try: occ_sr+=float(str(row[sr_idx] or 0).replace(',','')) if sr_idx >= 0 else 0
         except: pass
         try: occ_tr+=float(str(row[tr_idx] or 0).replace(',',''))
         except: pass
@@ -518,8 +496,8 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         except: pass
         occ_cnt+=1
     for row,o in V:
-        sq_idx = o+4 if is_st_format else o+3
-        mr_idx = o+7 if is_st_format else o+4
+        sq_idx = o+2 if is_vaf_format else o+3
+        mr_idx = o+5 if is_vaf_format else o+4
         try: vac_sq+=float(row[sq_idx] or 0)
         except: pass
         try: vac_mr+=float(str(row[mr_idx] or 0).replace(',',''))
@@ -922,7 +900,7 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.14'})
+    return jsonify({'status':'ok','version':'9.15'})
 
 @app.route('/')
 def index():
@@ -1046,7 +1024,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.14</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.15</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
