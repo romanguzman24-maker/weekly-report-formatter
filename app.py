@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.12 — Weekly Traffic tab added"""
+"""Weekly Report Formatter v9.13 — Fixed Village at First column offsets (Resident ID col)"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -212,7 +212,6 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
         st=str(row[2] or '').strip().lower(); u=str(row[0] or '').strip()
         if re.search(r'subtotal|village at|^total$',u,re.I): continue
         if not u or not re.match(r'^\d{2}',u): continue
-        # A row is a credit if Total Unpaid Charges < 0 OR Prepays < 0
         charges=row[4]; prepays=row[9] if len(row)>9 else None
         try: charge_val=float(str(charges or 0).replace(',',''))
         except: charge_val=0
@@ -318,20 +317,54 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         if re.match(r'^\d{3,5}$',v0): rr_offset=0; unit_pat=r'^\d{3,5}'; break
         if re.match(r'^\d{3,5}$',v1): rr_offset=1; unit_pat=r'^\d{3,5}'; break
 
-    # Detect if this is a Santa Teresa / 4-digit property with extra header cols
-    # Santa Teresa raw export has: Unit, Unit Type, Unit Set Aside (%), flag col, Resident Name, ...
+    # Detect if this export has a "Unit Set Aside" column (Village at First / Santa Teresa format).
+    # These exports have: Unit, Unit Type, Unit Set Aside (%), flag col, Resident ID, Resident Name, ...
     # vs Madrone: Unit, Unit Type, Resident Name, ...
-    # We detect by checking if col 2 (index) in first data row looks like a percentage or set-aside value
+    # Detection: col rr_offset+2 in first data row is a percentage / numeric set-aside value.
     is_st_format = False
     for row in rr[hi+1:]:
         if not row: continue
         unit_v = str(row[rr_offset] or '').strip()
         if not re.match(unit_pat, unit_v): continue
-        # Check col rr_offset+2 — if it looks like a % (30%/50%/60%) or numeric set-aside, it's ST format
         col2_v = str(row[rr_offset+2] or '').strip()
         if re.match(r'^\d{1,3}%?$', col2_v) or col2_v in ('30%','50%','60%','30','50','60'):
             is_st_format = True
         break
+
+    # Column layout for is_st_format (Village at First / Santa Teresa):
+    #   o+0  Unit
+    #   o+1  Unit Type
+    #   o+2  Unit Set Aside %
+    #   o+3  Flag/icon column (checkmark)
+    #   o+4  Resident ID
+    #   o+5  Resident Name
+    #   o+6  Sq Ft
+    #   o+7  Market Rent
+    #   o+8  Loss/Gain to Lease
+    #   o+9  Sub Rent
+    #   o+10 Tenant Rent
+    #   o+11 Lease Rent
+    #   o+12 Vacancy
+    #   o+13 Deposit
+    #   o+14 Move In
+    #   o+15 Lease From
+    #   o+16 Lease To
+    #
+    # Column layout for Madrone (no set-aside col):
+    #   o+0  Unit
+    #   o+1  Unit Type
+    #   o+2  Resident Name
+    #   o+3  Sq Ft
+    #   o+4  Market Rent
+    #   o+5  Loss/Gain
+    #   o+6  Sub Rent
+    #   o+7  Tenant Rent
+    #   o+8  Lease Rent
+    #   o+9  Vacancy
+    #   o+10 Deposit
+    #   o+11 Move In
+    #   o+12 Lease From
+    #   o+13 Lease To
 
     V,O=[],[]
     for row in rr[hi+1:]:
@@ -340,9 +373,7 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         unit=str(row[rr_offset] or '').strip()
         if not re.match(unit_pat,unit): continue
         o=rr_offset
-        # For ST format: name is at o+4 (after unit, unit_type, set_aside%, flag_col)
-        # For Madrone format: name is at o+2
-        name_idx = o+4 if is_st_format else o+2
+        name_idx = o+5 if is_st_format else o+2
         rname=str(row[name_idx] or '').strip() if len(row)>name_idx else ''
         if rname.strip().upper() in ('VACANT',' VACANT') or not rname.strip(): V.append((row,o))
         else: O.append((row,o))
@@ -350,7 +381,7 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
     O.sort(key=lambda x:str(x[0][x[1]] or '').strip())
 
     def set_aside_from_col(val):
-        """Parse set-aside directly from a column value (ST format)."""
+        """Parse set-aside directly from a column value (ST/First format)."""
         s = str(val or '').strip().replace('%','')
         if s == '30': return '30%'
         if s == '50': return '50%'
@@ -378,28 +409,22 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         ut=str(row[o+1] or '').strip() if len(row)>o+1 else ''
 
         if is_st_format:
-            # ST columns: unit@o, unit_type@o+1, set_aside@o+2, flag@o+3, name@o+4,
-            #             sq_ft@o+5, market_rent@o+6, loss_gain@o+7, sub_rent@o+8,
-            #             tenant_rent@o+9, lease_rent@o+10, vacancy@o+11, deposit@o+12,
-            #             move_in@o+13, lease_from@o+14, lease_to@o+15
             sa_raw = row[o+2] if len(row)>o+2 else None
             sa_display = set_aside_from_col(sa_raw)
-            rname = str(row[o+4] or '').strip() if len(row)>o+4 else ''
-            sq    = row[o+5]  if len(row)>o+5  else None
-            mr    = row[o+6]  if len(row)>o+6  else None
-            lg    = row[o+7]  if len(row)>o+7  else None
-            sr    = row[o+8]  if len(row)>o+8  else None
-            tr    = row[o+9]  if len(row)>o+9  else None
-            lr    = row[o+10] if len(row)>o+10 else None
-            vac_r = row[o+11] if len(row)>o+11 else None
-            dep   = row[o+12] if len(row)>o+12 else None
-            mi    = row[o+13] if len(row)>o+13 else None
-            lf    = row[o+14] if len(row)>o+14 else None
-            lt    = row[o+15] if len(row)>o+15 else None
+            # o+3 is flag col, o+4 is Resident ID, o+5 is Resident Name
+            rname = str(row[o+5] or '').strip() if len(row)>o+5 else ''
+            sq    = row[o+6]  if len(row)>o+6  else None
+            mr    = row[o+7]  if len(row)>o+7  else None
+            lg    = row[o+8]  if len(row)>o+8  else None
+            sr    = row[o+9]  if len(row)>o+9  else None
+            tr    = row[o+10] if len(row)>o+10 else None
+            lr    = row[o+11] if len(row)>o+11 else None
+            vac_r = row[o+12] if len(row)>o+12 else None
+            dep   = row[o+13] if len(row)>o+13 else None
+            mi    = row[o+14] if len(row)>o+14 else None
+            lf    = row[o+15] if len(row)>o+15 else None
+            lt    = row[o+16] if len(row)>o+16 else None
         else:
-            # Madrone columns: unit@o, unit_type@o+1, name@o+2, sq@o+3, mr@o+4,
-            #                  lg@o+5, sr@o+6, tr@o+7, lr@o+8, vac@o+9, dep@o+10,
-            #                  mi@o+11, lf@o+12, lt@o+13
             sa_display = set_aside(ut)
             rname = str(row[o+2] or '').strip() if len(row)>o+2 else ''
             sq    = row[o+3]  if len(row)>o+3  else None
@@ -476,11 +501,11 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
     occ_sq=occ_mr=occ_sr=occ_tr=occ_dep=0; occ_cnt=0
     vac_sq=vac_mr=0; vac_cnt=len(V)
     for row,o in O:
-        sq_idx  = o+5 if is_st_format else o+3
-        mr_idx  = o+6 if is_st_format else o+4
-        sr_idx  = o+8 if is_st_format else o+6
-        tr_idx  = o+9 if is_st_format else o+7
-        dep_idx = o+12 if is_st_format else o+10
+        sq_idx  = o+6 if is_st_format else o+3
+        mr_idx  = o+7 if is_st_format else o+4
+        sr_idx  = o+9 if is_st_format else o+6
+        tr_idx  = o+10 if is_st_format else o+7
+        dep_idx = o+13 if is_st_format else o+10
         try: occ_sq+=float(row[sq_idx] or 0)
         except: pass
         try: occ_mr+=float(str(row[mr_idx] or 0).replace(',',''))
@@ -493,8 +518,8 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         except: pass
         occ_cnt+=1
     for row,o in V:
-        sq_idx = o+5 if is_st_format else o+3
-        mr_idx = o+6 if is_st_format else o+4
+        sq_idx = o+6 if is_st_format else o+3
+        mr_idx = o+7 if is_st_format else o+4
         try: vac_sq+=float(row[sq_idx] or 0)
         except: pass
         try: vac_mr+=float(str(row[mr_idx] or 0).replace(',',''))
@@ -549,7 +574,6 @@ TRAFFIC_SOURCES=[
 
 def fmt_traffic(wb_out, raw_bytes, date, prop):
     import csv, io as _io
-    # Parse the uploaded CSV
     text = raw_bytes.decode('utf-8-sig')
     reader = csv.DictReader(_io.StringIO(text))
     src_data = {}
@@ -566,13 +590,11 @@ def fmt_traffic(wb_out, raw_bytes, date, prop):
             'applications': iv('Applications')
         }
 
-    # Derive date range label from date (MM.DD.YY) — find the Monday of that week
     import datetime as _dt
     tab = f'Weekly Traffic {date}'
     if tab in wb_out.sheetnames: del wb_out[tab]
     ws = wb_out.create_sheet(tab)
 
-    # Parse date to build Mon-Sun range label
     try:
         d = _dt.datetime.strptime(date, '%m.%d.%y')
         mon = d - _dt.timedelta(days=d.weekday())
@@ -581,9 +603,7 @@ def fmt_traffic(wb_out, raw_bytes, date, prop):
     except:
         date_range = date
 
-    MC = 7  # Source, Plan, Leads, Prospects, Visits, Leases, Applications
-
-    # Title rows (green, rows 1-3)
+    MC = 7
     titles = [
         ('Weekly Traffic', True),
         (prop, False),
@@ -599,7 +619,6 @@ def fmt_traffic(wb_out, raw_bytes, date, prop):
         ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=MC)
         ws.row_dimensions[r].height = 15.0
 
-    # Header row (row 4)
     hdrs = ['Source','Plan','Leads','Prospects','Visits','Leases','Applications']
     for c, h in enumerate(hdrs, 1):
         cell = ws.cell(4, c)
@@ -608,7 +627,6 @@ def fmt_traffic(wb_out, raw_bytes, date, prop):
         cell.border = bblack()
     ws.row_dimensions[4].height = 15.0
 
-    # Data rows (rows 5+)
     rn = 5
     for src in TRAFFIC_SOURCES:
         d = src_data.get(src, {'plan':'','leads':0,'prospects':0,'visits':0,'leases':0,'applications':0})
@@ -627,7 +645,6 @@ def fmt_traffic(wb_out, raw_bytes, date, prop):
         ws.row_dimensions[rn].height = 15.0
         rn += 1
 
-    # Total row
     total_row = rn
     ws.cell(rn,1).value = 'Total'
     ws.cell(rn,1).font = gfont(bold=True)
@@ -644,7 +661,6 @@ def fmt_traffic(wb_out, raw_bytes, date, prop):
         cell.number_format = '0'
     ws.row_dimensions[rn].height = 15.0
 
-    # Column widths
     for col, w in {'A':28,'B':10,'C':10,'D':12,'E':10,'F':10,'G':14}.items():
         ws.column_dimensions[col].width = w
 
@@ -851,15 +867,13 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
         ws.cell(18,5).value=tar_total/leased_val if leased_val else 0
         ws.cell(19,5).value=sar_total/leased_val if leased_val else 0
         ws.cell(20,5).value=(tar_total+sar_total)/leased_val if leased_val else 0
-    # ── WEEKLY TRAFFIC TABLE (cols E-K, rows 25+) ────────────────────────────
     if traffic_data:
-        TR_COL = 5  # starts at col E
-        TR_COLS = 6  # Source, Leads, Prospects, Visits, Leases, Applications
+        TR_COL = 5
+        TR_COLS = 6
         tr_hdrs = ['Source','Leads','Prospects','Visits','Leases','Applications']
         active_sources = [(src, vals) for src, vals in traffic_data['rows'] if any(v!=0 for v in vals)]
         date_range = traffic_data.get('date_range', date)
 
-        # Title row 25 (same row as NTV header)
         for c in range(TR_COL, TR_COL+TR_COLS):
             ws.cell(25,c).fill=gfill(HDR_BLUE); ws.cell(25,c).font=f9b
             ws.cell(25,c).alignment=galign('center')
@@ -867,7 +881,6 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
         ws.cell(25,TR_COL).value=f'Weekly Traffic  " {date_range} "'
         ws.merge_cells(start_row=25,start_column=TR_COL,end_row=25,end_column=TR_COL+TR_COLS-1)
 
-        # Header row 26
         for i,h in enumerate(tr_hdrs):
             c = TR_COL+i
             ws.cell(26,c).value=h; ws.cell(26,c).font=f9b
@@ -875,7 +888,6 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
             ws.cell(26,c).alignment=Alignment(horizontal='center' if i>0 else 'left',vertical='center')
             ws.cell(26,c).border=bblack()
 
-        # Data rows starting at 27
         tr_rn = 27
         for src, vals in active_sources:
             ws.cell(tr_rn,TR_COL).value=src; ws.cell(tr_rn,TR_COL).font=f9
@@ -890,7 +902,6 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
                 ws.cell(tr_rn,c).border=bgray(); ws.cell(tr_rn,c).number_format='0'
             ws.row_dimensions[tr_rn].height=15.0; tr_rn+=1
 
-        # Total row
         tr_data_start=27; tr_data_end=tr_rn-1
         ws.cell(tr_rn,TR_COL).value='Total'; ws.cell(tr_rn,TR_COL).font=f9b
         ws.cell(tr_rn,TR_COL).fill=gfill(GRAY_HDR)
@@ -911,7 +922,7 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.9'})
+    return jsonify({'status':'ok','version':'9.13'})
 
 @app.route('/')
 def index():
@@ -1035,7 +1046,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.12</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.13</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
