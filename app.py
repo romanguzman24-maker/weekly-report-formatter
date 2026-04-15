@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.13 — Fixed Village at First column offsets (Resident ID col)"""
+"""Weekly Report Formatter v9.14 — Corrected Village at First/ST column order (SqFt before ResID)"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -336,9 +336,9 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
     #   o+1  Unit Type
     #   o+2  Unit Set Aside %
     #   o+3  Flag/icon column (checkmark)
-    #   o+4  Resident ID
-    #   o+5  Resident Name
-    #   o+6  Sq Ft
+    #   o+4  Sq Ft          ← comes BEFORE Resident ID
+    #   o+5  Resident ID
+    #   o+6  Resident Name
     #   o+7  Market Rent
     #   o+8  Loss/Gain to Lease
     #   o+9  Sub Rent
@@ -373,7 +373,7 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         unit=str(row[rr_offset] or '').strip()
         if not re.match(unit_pat,unit): continue
         o=rr_offset
-        name_idx = o+5 if is_st_format else o+2
+        name_idx = o+6 if is_st_format else o+2
         rname=str(row[name_idx] or '').strip() if len(row)>name_idx else ''
         if rname.strip().upper() in ('VACANT',' VACANT') or not rname.strip(): V.append((row,o))
         else: O.append((row,o))
@@ -411,9 +411,9 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         if is_st_format:
             sa_raw = row[o+2] if len(row)>o+2 else None
             sa_display = set_aside_from_col(sa_raw)
-            # o+3 is flag col, o+4 is Resident ID, o+5 is Resident Name
-            rname = str(row[o+5] or '').strip() if len(row)>o+5 else ''
-            sq    = row[o+6]  if len(row)>o+6  else None
+            # o+3 is flag col, o+4 is Sq Ft, o+5 is Resident ID, o+6 is Resident Name
+            rname = str(row[o+6] or '').strip() if len(row)>o+6 else ''
+            sq    = row[o+4]  if len(row)>o+4  else None
             mr    = row[o+7]  if len(row)>o+7  else None
             lg    = row[o+8]  if len(row)>o+8  else None
             sr    = row[o+9]  if len(row)>o+9  else None
@@ -501,7 +501,7 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
     occ_sq=occ_mr=occ_sr=occ_tr=occ_dep=0; occ_cnt=0
     vac_sq=vac_mr=0; vac_cnt=len(V)
     for row,o in O:
-        sq_idx  = o+6 if is_st_format else o+3
+        sq_idx  = o+4 if is_st_format else o+3
         mr_idx  = o+7 if is_st_format else o+4
         sr_idx  = o+9 if is_st_format else o+6
         tr_idx  = o+10 if is_st_format else o+7
@@ -518,7 +518,7 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         except: pass
         occ_cnt+=1
     for row,o in V:
-        sq_idx = o+6 if is_st_format else o+3
+        sq_idx = o+4 if is_st_format else o+3
         mr_idx = o+7 if is_st_format else o+4
         try: vac_sq+=float(row[sq_idx] or 0)
         except: pass
@@ -922,7 +922,7 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.13'})
+    return jsonify({'status':'ok','version':'9.14'})
 
 @app.route('/')
 def index():
@@ -1046,7 +1046,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.13</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.14</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
