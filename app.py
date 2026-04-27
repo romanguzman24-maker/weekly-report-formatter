@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.38 — All Weekly Summary blocks side-by-side, unified blue palette, NTV centered"""
+"""Weekly Report Formatter v9.40 — All Weekly Summary blocks side-by-side, unified blue palette, NTV centered"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -207,6 +207,19 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
             cell.fill=gfill(GRAY_AR)
             cell.alignment=Alignment(horizontal='right' if ra else ('center' if c==13 else 'left'),vertical='center',wrap_text=False)
     for r in range(1,4): ws.cell(r,13).fill=gfill(GREEN); ws.cell(r,13).font=gfont(color=tc)
+    
+    # Add legend for red highlighting (Tenant AR only, not SUB AR)
+    if not is_sub:
+        ws.merge_cells('N1:N3')
+        legend_cell = ws.cell(1, 14)
+        legend_cell.value = "Red = tenant has unpaid balance"
+        legend_cell.fill = gfill('FFFFC7CE')  # light red
+        legend_cell.font = gfont(bold=True, color=BLACK)
+        legend_cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        # Border the legend
+        for r in range(1, 4):
+            ws.cell(r, 14).border = bblack()
+            ws.cell(r, 14).fill = gfill('FFFFC7CE')
     hi=next((i for i,r in enumerate(rr[:10]) if r and any(str(c or '').lower()=='unit' for c in r) and any(str(c or '').lower()=='resident' for c in r)),5)
     ev,cu,no,cr=[],[],[],[]
     for row in rr[hi+1:]:
@@ -230,17 +243,22 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
     ev.sort(key=sk); cu.sort(key=sk); no.sort(key=sk)
     def write_row(rn, row, rc):
         rid=str(row[1] or '').strip(); note=prev_notes.get(rid,'')
+        # Check if tenant has any balance (Total Unpaid Charges > 0)
+        try: total_unpaid=float(str(row[4] or 0).replace(',',''))
+        except: total_unpaid=0
+        has_balance = total_unpaid > 0
+        row_fill = 'FFFFC7CE' if has_balance else 'FFFFFFFF'  # light red if owes; white otherwise
         for c in range(1,13):
             v=row[c-1]; sv=str(v if v is not None else '').strip()
             try: num=float(sv.replace(',',''))
             except: num=None
             isn=5<=c<=12 and num is not None and sv!=''
             cell=ws.cell(rn,c); cell.value=num if isn else (sv or None)
-            cell.font=gfont(color=rc); cell.fill=gfill(WHITE)
+            cell.font=gfont(color=rc); cell.fill=gfill(row_fill)
             cell.alignment=Alignment(horizontal='right' if c>=5 else 'left',vertical='center',wrap_text=False)
             if isn: cell.number_format='#,##0.00'
         nc=ws.cell(rn,13); nc.value=None; nc.font=gfont(color=BLACK)
-        nc.fill=gfill(WHITE); nc.alignment=Alignment(horizontal='center',vertical='center',wrap_text=False)
+        nc.fill=gfill(row_fill); nc.alignment=Alignment(horizontal='center',vertical='center',wrap_text=False)
         nc.number_format='@'
     data_start=7; rn=data_start
     for row in ev+cu+no:
@@ -272,6 +290,8 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
         cr_end=rn-1
         write_total(rn,cr_start,cr_end,'Credits Total'); rn+=1
     for i,w in enumerate([9,13,10,24,12,10,10,10,10,10,10,12,38],1): ws.column_dimensions[get_column_letter(i)].width=w
+    if not is_sub:
+        ws.column_dimensions['N'].width = 22
     ws.freeze_panes='A7'
     return ws, len(ev), len(cu), len(no), pos_end, data_start
 
@@ -524,7 +544,7 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
     return ws, len(V), len(O)
 
 # ============================================================================
-# EXPIRING LEASES (120 days) - new in v9.38
+# EXPIRING LEASES (120 days) - new in v9.40
 # ============================================================================
 def parse_expiring(raw_bytes):
     """Parse Yardi Expiring Leases export. Returns list of dict rows, sorted oldest -> newest."""
@@ -984,7 +1004,7 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
     cell_b14.alignment = galign('center'); cell_b14.border = AB
     style(14, 3, '=B14/B5', fmt='0.00%', align='center', border=AB)
     ws.merge_cells(start_row=14, start_column=4, end_row=14, end_column=5)
-    style(14, 4, '# of tenants owing prev. full month rent, including', align='left', border=AB)
+    style(14, 4, "# of tenants who haven't paid full rent", align='left', border=AB)
     style(14, 7, '@ legal', align='left', border=AB)
     
     # Row 15: blank spacer with merged D:H
@@ -1212,9 +1232,13 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
             st = str(tar_ws.cell(r, 3).value or '').strip().lower()
             if st in ('eviction', 'past'): ev += 1; f14 += 1
             try:
-                p31 = float(tar_ws.cell(r, 7).value or 0); p61 = float(tar_ws.cell(r, 8).value or 0)
-                p90 = float(tar_ws.cell(r, 9).value or 0); cur = float(tar_ws.cell(r, 6).value or 0)
-                if p31 + p61 + p90 > 0 and cur > 0 and p31 + p61 + p90 >= cur: b14 += 1
+                cur = float(tar_ws.cell(r, 6).value or 0)
+                p31 = float(tar_ws.cell(r, 7).value or 0)
+                p61 = float(tar_ws.cell(r, 8).value or 0)
+                p90 = float(tar_ws.cell(r, 9).value or 0)
+                # Count any tenant with any balance (current OR past)
+                if cur + p31 + p61 + p90 > 0:
+                    b14 += 1
             except: pass
         ws['B11'] = -ev; ws['B14'] = b14; ws['F14'] = f14
     
@@ -1251,7 +1275,7 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.38'})
+    return jsonify({'status':'ok','version':'9.40'})
 
 @app.route('/')
 def index():
@@ -1386,7 +1410,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.38</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.40</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
