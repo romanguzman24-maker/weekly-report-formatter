@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.42 — All Weekly Summary blocks side-by-side, unified blue palette, NTV centered"""
+"""Weekly Report Formatter v9.43 — All Weekly Summary blocks side-by-side, unified blue palette, NTV centered"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -244,6 +244,7 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub, rent_lookup=None):
         try: return -(float(str(r[4] or 0).replace(',','')))
         except: return 0
     ev.sort(key=sk); cu.sort(key=sk); no.sort(key=sk)
+    red_count = [0]  # mutable container so closure can update
     def write_row(rn, row, rc):
         rid=str(row[1] or '').strip(); note=prev_notes.get(rid,'')
         # Determine if this row should be red-highlighted:
@@ -261,6 +262,7 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub, rent_lookup=None):
                     i_val = float(str(row[8] or 0).replace(',',''))   # Over 90 days
                     if max(f_val, g_val, h_val, i_val) >= full_rent:
                         has_balance = True
+                        red_count[0] += 1
                 except: pass
         row_fill = 'FFFFC7CE' if has_balance else 'FFFFFFFF'  # light red if owes full rent; white otherwise
         for c in range(1,13):
@@ -308,7 +310,7 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub, rent_lookup=None):
     if not is_sub:
         ws.column_dimensions['N'].width = 22
     ws.freeze_panes='A7'
-    return ws, len(ev), len(cu), len(no), pos_end, data_start
+    return ws, len(ev), len(cu), len(no), pos_end, data_start, red_count[0]
 
 def fmt_rr(wb_out, raw_bytes, date, prop):
     wb_r=openpyxl.load_workbook(io.BytesIO(raw_bytes),data_only=True,keep_vba=False,read_only=True)
@@ -559,7 +561,7 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
     return ws, len(V), len(O)
 
 # ============================================================================
-# EXPIRING LEASES (120 days) - new in v9.42
+# EXPIRING LEASES (120 days) - new in v9.43
 # ============================================================================
 def parse_expiring(raw_bytes):
     """Parse Yardi Expiring Leases export. Returns list of dict rows, sorted oldest -> newest."""
@@ -872,7 +874,7 @@ def parse_traffic(raw_bytes, date):
     active = [(src, data[src]) for src in SOURCES if src in data and any(v!=0 for v in data[src])]
     return {'date_range': date_range, 'rows': active}
 
-def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar_ws=None, tar_total=0, sar_total=0, rr_ws=None, traffic_data=None, expiring_rows=None):
+def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar_ws=None, tar_total=0, sar_total=0, rr_ws=None, traffic_data=None, expiring_rows=None, tar_red_count=0):
     """
     Build Weekly Summary per spec:
       - 10 cols wide (A-J), ~56 rows
@@ -1241,21 +1243,14 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
             ws['C16'] = leased
     
     if tar_ws:
-        ev = b14 = f14 = 0
+        ev = f14 = 0
         for r in range(7, tar_ws.max_row + 1):
             if str(tar_ws.cell(r, 1).value or '').lower() == 'total': break
             st = str(tar_ws.cell(r, 3).value or '').strip().lower()
             if st in ('eviction', 'past'): ev += 1; f14 += 1
-            try:
-                cur = float(tar_ws.cell(r, 6).value or 0)
-                p31 = float(tar_ws.cell(r, 7).value or 0)
-                p61 = float(tar_ws.cell(r, 8).value or 0)
-                p90 = float(tar_ws.cell(r, 9).value or 0)
-                # Count any tenant with any balance (current OR past)
-                if cur + p31 + p61 + p90 > 0:
-                    b14 += 1
-            except: pass
-        ws['B11'] = -ev; ws['B14'] = b14; ws['F14'] = f14
+        # B14 = count of red-highlighted tenants (any F/G/H/I col >= full rent)
+        # This number is computed inside fmt_ar and passed in as tar_red_count
+        ws['B11'] = -ev; ws['B14'] = tar_red_count; ws['F14'] = f14
     
     def getT(aw):
         if not aw: return 0
@@ -1290,7 +1285,7 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.42'})
+    return jsonify({'status':'ok','version':'9.43'})
 
 @app.route('/')
 def index():
@@ -1332,14 +1327,15 @@ def format_report():
                         rent_lookup[unit_val] = tenant_rent_val
                 except: pass
         tar_f=request.files.get('tar')
+        tar_red_count=0
         if tar_f:
-            tar_ws,ev,cu,no,pos_end,data_start=fmt_ar(wb_out,tar_f.read(),date,pTAR,False,rent_lookup)
+            tar_ws,ev,cu,no,pos_end,data_start,tar_red_count=fmt_ar(wb_out,tar_f.read(),date,pTAR,False,rent_lookup)
             for r in range(data_start,pos_end+1):
                 try: tar_total+=float(tar_ws.cell(r,5).value or 0)
                 except: pass
         sar_f=request.files.get('sar')
         if sar_f:
-            sar_ws,ev,cu,no,pos_end,data_start=fmt_ar(wb_out,sar_f.read(),date,pSAR,True)
+            sar_ws,ev,cu,no,pos_end,data_start,_=fmt_ar(wb_out,sar_f.read(),date,pSAR,True)
             for r in range(data_start,pos_end+1):
                 try: sar_total+=float(sar_ws.cell(r,5).value or 0)
                 except: pass
@@ -1356,7 +1352,7 @@ def format_report():
             except Exception:
                 traceback.print_exc()
                 expiring_rows = None
-        build_weekly_summary(wb_out,wb_ro,date,prop,ua_ws,tar_ws,sar_ws,tar_total,sar_total,rr_ws,traffic_data,expiring_rows)
+        build_weekly_summary(wb_out,wb_ro,date,prop,ua_ws,tar_ws,sar_ws,tar_total,sar_total,rr_ws,traffic_data,expiring_rows,tar_red_count)
         wb_ro.close()
         def find_tab(names, prefix):
             return next((n for n in names if n.strip().lower().startswith(prefix.lower())), None)
@@ -1437,7 +1433,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.42</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.43</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
