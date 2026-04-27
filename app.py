@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.40 — All Weekly Summary blocks side-by-side, unified blue palette, NTV centered"""
+"""Weekly Report Formatter v9.42 — All Weekly Summary blocks side-by-side, unified blue palette, NTV centered"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -185,7 +185,10 @@ def get_notes(wb, prefix):
         if id_ and note: notes[id_]=note
     return notes
 
-def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
+def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub, rent_lookup=None):
+    """rent_lookup: optional dict mapping unit_number -> tenant_rent (float).
+    When provided (Tenant AR only, not SUB AR), rows where any past-due bucket
+    (F=0-30, G=31-60, H=61-90, I=Over 90) >= the tenant's full rent get red highlight."""
     wb_r=openpyxl.load_workbook(io.BytesIO(raw_bytes),data_only=True,keep_vba=False,read_only=True)
     rr=list(wb_r.active.iter_rows(values_only=True)); wb_r.close()
     NL='Comments'; tc=BLACK if is_sub else DARKGRAY
@@ -212,7 +215,7 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
     if not is_sub:
         ws.merge_cells('N1:N3')
         legend_cell = ws.cell(1, 14)
-        legend_cell.value = "Red = tenant has unpaid balance"
+        legend_cell.value = "Red = tenants who have unpaid full rent balance"
         legend_cell.fill = gfill('FFFFC7CE')  # light red
         legend_cell.font = gfont(bold=True, color=BLACK)
         legend_cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
@@ -243,11 +246,23 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub):
     ev.sort(key=sk); cu.sort(key=sk); no.sort(key=sk)
     def write_row(rn, row, rc):
         rid=str(row[1] or '').strip(); note=prev_notes.get(rid,'')
-        # Check if tenant has any balance (Total Unpaid Charges > 0)
-        try: total_unpaid=float(str(row[4] or 0).replace(',',''))
-        except: total_unpaid=0
-        has_balance = total_unpaid > 0
-        row_fill = 'FFFFC7CE' if has_balance else 'FFFFFFFF'  # light red if owes; white otherwise
+        # Determine if this row should be red-highlighted:
+        # ONLY for Tenant AR (not SUB AR), and only when rent_lookup is available
+        # Logic: any past-due bucket (F/G/H/I = cols 6/7/8/9) >= this tenant's full rent
+        has_balance = False
+        if not is_sub and rent_lookup:
+            unit = str(row[0] or '').strip()
+            full_rent = rent_lookup.get(unit, 0)
+            if full_rent > 0:
+                try:
+                    f_val = float(str(row[5] or 0).replace(',',''))   # 0-30 days
+                    g_val = float(str(row[6] or 0).replace(',',''))   # 31-60 days
+                    h_val = float(str(row[7] or 0).replace(',',''))   # 61-90 days
+                    i_val = float(str(row[8] or 0).replace(',',''))   # Over 90 days
+                    if max(f_val, g_val, h_val, i_val) >= full_rent:
+                        has_balance = True
+                except: pass
+        row_fill = 'FFFFC7CE' if has_balance else 'FFFFFFFF'  # light red if owes full rent; white otherwise
         for c in range(1,13):
             v=row[c-1]; sv=str(v if v is not None else '').strip()
             try: num=float(sv.replace(',',''))
@@ -544,7 +559,7 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
     return ws, len(V), len(O)
 
 # ============================================================================
-# EXPIRING LEASES (120 days) - new in v9.40
+# EXPIRING LEASES (120 days) - new in v9.42
 # ============================================================================
 def parse_expiring(raw_bytes):
     """Parse Yardi Expiring Leases export. Returns list of dict rows, sorted oldest -> newest."""
@@ -1275,7 +1290,7 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.40'})
+    return jsonify({'status':'ok','version':'9.42'})
 
 @app.route('/')
 def index():
@@ -1301,9 +1316,24 @@ def format_report():
         tar_total=sar_total=0
         ua_f=request.files.get('ua')
         if ua_f: ua_ws,*_=fmt_ua(wb_out,ua_f.read(),date,prop)
+        # Process Rent Roll FIRST so we can build a unit->full_rent lookup for Tenant AR highlighting
+        rr_ws=None
+        rent_lookup={}
+        rr_f=request.files.get('rr')
+        if rr_f: rr_ws,*_=fmt_rr(wb_out,rr_f.read(),date,prop)
+        if rr_ws:
+            # Build {unit: tenant_rent} dict from rent roll (col 1 = Unit, col 9 = Tenant Rent)
+            for rr_r in range(6, rr_ws.max_row + 1):
+                unit_val = str(rr_ws.cell(rr_r, 1).value or '').strip()
+                if not unit_val: continue
+                try:
+                    tenant_rent_val = float(rr_ws.cell(rr_r, 9).value or 0)
+                    if tenant_rent_val > 0:
+                        rent_lookup[unit_val] = tenant_rent_val
+                except: pass
         tar_f=request.files.get('tar')
         if tar_f:
-            tar_ws,ev,cu,no,pos_end,data_start=fmt_ar(wb_out,tar_f.read(),date,pTAR,False)
+            tar_ws,ev,cu,no,pos_end,data_start=fmt_ar(wb_out,tar_f.read(),date,pTAR,False,rent_lookup)
             for r in range(data_start,pos_end+1):
                 try: tar_total+=float(tar_ws.cell(r,5).value or 0)
                 except: pass
@@ -1313,9 +1343,6 @@ def format_report():
             for r in range(data_start,pos_end+1):
                 try: sar_total+=float(sar_ws.cell(r,5).value or 0)
                 except: pass
-        rr_ws=None
-        rr_f=request.files.get('rr')
-        if rr_f: rr_ws,*_=fmt_rr(wb_out,rr_f.read(),date,prop)
         traffic_data=None
         tr_f=request.files.get('tr')
         if tr_f: traffic_data=parse_traffic(tr_f.read(),date)
@@ -1410,7 +1437,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.40</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.42</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
