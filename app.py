@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.16 — Adds Expiring Leases (120 days) tab + Weekly Summary block"""
+"""Weekly Report Formatter v9.38 — All Weekly Summary blocks side-by-side, unified blue palette, NTV centered"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -524,7 +524,7 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
     return ws, len(V), len(O)
 
 # ============================================================================
-# EXPIRING LEASES (120 days) - new in v9.16
+# EXPIRING LEASES (120 days) - new in v9.38
 # ============================================================================
 def parse_expiring(raw_bytes):
     """Parse Yardi Expiring Leases export. Returns list of dict rows, sorted oldest -> newest."""
@@ -838,269 +838,420 @@ def parse_traffic(raw_bytes, date):
     return {'date_range': date_range, 'rows': active}
 
 def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar_ws=None, tar_total=0, sar_total=0, rr_ws=None, traffic_data=None, expiring_rows=None):
+    """
+    Build Weekly Summary per spec:
+      - 10 cols wide (A-J), ~56 rows
+      - Calibri 9pt, fill default white, accent #BDD7EE on headers/totals/inputs
+      - Col A = left-margin spacer with right border (A1:A56)
+      - Sections 1-8 (see spec)
+      - Section 8 'gutter trick': D25-56 cleared with specific borders kept
+    """
+    BLUE = 'FFBDD7EE'
+    
     total_units = get_total_units(prop)
-    ws_name=next((n for n in wb_ro.sheetnames if 'weekly summary' in n.lower()),None)
-    if not ws_name: return
-    ws_src=wb_ro[ws_name]
-    src_vals={}
-    for row in ws_src.iter_rows(values_only=False):
-        for cell in row:
-            if cell.value is not None:
-                src_vals[(cell.row,cell.column)]=cell.value
-    if ws_name in wb_out.sheetnames: del wb_out[ws_name]
-    ws=wb_out.create_sheet(ws_name)
-    f9=gfont(sz=9); f9b=gfont(bold=True,sz=9)
-    NTV_BLUE='FFBDD7EE'; HDR_BLUE='FFB8CCE4'
-    def cell(r,c,val=None,bg=None,bold=False,fmt=None,h='left',bdr=None,wrap=False):
-        cell=ws.cell(r,c)
-        if val is not None: cell.value=val
-        if bg: cell.fill=gfill(bg)
-        cell.font=gfont(bold=bold,sz=9)
-        cell.alignment=Alignment(horizontal=h,vertical='center',wrap_text=wrap)
-        if fmt: cell.number_format=fmt
-        if bdr: cell.border=bdr
+    
+    # Read NTV data from source workbook
+    ws_name = next((n for n in wb_ro.sheetnames if 'weekly summary' in n.lower()), None)
+    src_vals = {}
+    if ws_name:
+        ws_src = wb_ro[ws_name]
+        for row in ws_src.iter_rows(values_only=False):
+            for cell in row:
+                if cell.value is not None:
+                    src_vals[(cell.row, cell.column)] = cell.value
+        if ws_name in wb_out.sheetnames:
+            del wb_out[ws_name]
+        ws = wb_out.create_sheet(ws_name)
+    else:
+        ws = wb_out.create_sheet('Weekly Summary ')
+    
+    f9 = gfont(sz=9)
+    f9b = gfont(bold=True, sz=9)
+    AB = bblack()  # all-sides thin black
+    
+    BR = Border(right=T)   # right only
+    BL = Border(left=T)    # left only
+    BLR = Border(left=T, right=T)  # left + right
+    
+    def style(r, c, val=None, fill=None, bold=False, border=None,
+              align='left', fmt=None, wrap=False):
+        cell = ws.cell(r, c)
+        if val is not None: cell.value = val
+        if fill: cell.fill = gfill(fill)
+        cell.font = gfont(bold=bold, sz=9)
+        cell.alignment = Alignment(horizontal=align, vertical='center', wrap_text=wrap)
+        if fmt: cell.number_format = fmt
+        if border: cell.border = border
         return cell
-    AB=bblack()
-    for r in range(1,4):
-        for c in range(2,8):
-            ws.cell(r,c).fill=gfill(HDR_BLUE); ws.cell(r,c).font=f9b
-            ws.cell(r,c).alignment=galign('center')
-            ws.cell(r,c).border=Border(top=T if r==1 else None,bottom=T if r==3 else None,left=T if c==2 else None,right=T if c==7 else None)
-    ws.cell(1,2).value=src_vals.get((1,2), prop.split('(')[0].strip())
-    ws.cell(2,2).value=src_vals.get((2,2),'Occupancy & Delinquency Summary')
-    ws.cell(3,2).value=date; ws.cell(3,2).fill=gfill(BLUE_IN)
-    for r in range(1,4): ws.merge_cells(start_row=r,start_column=2,end_row=r,end_column=7)
-    for r in range(4,23):
-        for c in range(2,8):
-            ws.cell(r,c).border=AB; ws.cell(r,c).font=f9
-    cell(5,2,total_units,h='center'); cell(5,3,'=B5/$B$5',fmt='0.00%',h='center'); cell(5,4,'Total Units',h='left')
-    occ=[(6,'Subtract',False,'Physically Vacant'),(7,'Add',True,'Applications - Approved @ KG'),(8,'Add',True,'Applications - Pending Not Approved @ KG'),(9,'Add',True,'Applications - Site Processing - Not Sent to KG'),(10,'Subtract',False,'Notices to Vacate Not at Legal'),(11,'Subtract',False,'Notices to Vacate @ Legal'),(12,None,False,'NET LEASED ')]
-    for r,lbl,is_blue,desc in occ:
-        if lbl: ws.cell(r,1).value=lbl; ws.cell(r,1).font=f9; ws.cell(r,1).alignment=galign('center')
-        if r==12: ws.cell(r,2).value='=B5+B6+B7+B8+B9+B10+B11'
-        else:
-            if is_blue: ws.cell(r,2).fill=gfill(BLUE_IN)
-        ws.cell(r,2).font=f9; ws.cell(r,2).alignment=galign('center')
-        ws.cell(r,3).value=f'=B{r}/$B$5'; ws.cell(r,3).font=f9; ws.cell(r,3).number_format='0.00%'; ws.cell(r,3).alignment=galign('center')
-        ws.cell(r,4).value=desc; ws.cell(r,4).font=f9; ws.cell(r,4).alignment=galign('left')
-    for r in [6,10,11]: ws.cell(r,2).fill=gfill(BLUE_IN)
-    ws.cell(14,2).fill=gfill(BLUE_IN); ws.cell(14,2).font=f9; ws.cell(14,2).alignment=galign('center'); ws.cell(14,2).border=AB
-    ws.cell(14,3).value='=B14/B5'; ws.cell(14,3).font=f9; ws.cell(14,3).number_format='0.00%'; ws.cell(14,3).alignment=galign('center'); ws.cell(14,3).border=AB
-    ws.cell(14,4).value='# of tenants owing prev. full month rent, including'; ws.cell(14,4).font=f9; ws.cell(14,4).alignment=galign('left'); ws.cell(14,4).border=AB
-    ws.cell(14,5).border=AB; ws.cell(14,5).font=f9
-    ws.cell(14,6).font=f9; ws.cell(14,6).alignment=galign('center'); ws.cell(14,6).border=AB
-    ws.cell(14,7).value='@ legal'; ws.cell(14,7).font=f9; ws.cell(14,7).border=AB
-    ws.cell(16,2).font=f9; ws.cell(16,2).alignment=galign('center'); ws.cell(16,2).border=AB
-    ws.cell(16,3).fill=gfill(BLUE_IN); ws.cell(16,3).font=f9; ws.cell(16,3).alignment=galign('center'); ws.cell(16,3).number_format='#,##0_);(#,##0)'; ws.cell(16,3).border=AB
-    ws.cell(16,4).value='# Physically Occupied and Total Leased Rent'; ws.cell(16,4).font=f9; ws.cell(16,4).alignment=galign('left'); ws.cell(16,4).border=AB
-    for c in [5,6,7]: ws.cell(16,c).border=AB; ws.cell(16,c).font=f9
-    AR_FMT='_([$$-409]* #,##0.00_);_([$$-409]* \\(#,##0.00\\);_([$$-409]* "-"??_);_(@_)'
-    for r,desc in [(18,'Tenant Accounts Receivable (AR)'),(19,'Subsidy Accounts Receivable (AR) '),(20,'Total  AR')]:
-        for c in range(2,8): ws.cell(r,c).border=AB; ws.cell(r,c).font=f9
-        if r in [18,19]: ws.cell(r,3).fill=gfill(BLUE_IN)
-        ws.cell(r,3).alignment=Alignment(horizontal='center',vertical='center',wrap_text=False); ws.cell(r,3).number_format=AR_FMT
-        ws.cell(r,4).value=desc; ws.cell(r,4).alignment=Alignment(horizontal='left',vertical='center',wrap_text=False)
-        if r in [18,19]: ws.cell(r,5).value=f'=C{r}/C16'; ws.cell(r,5).number_format='0.00%'; ws.cell(r,5).alignment=Alignment(horizontal='right',vertical='center',wrap_text=False)
-        if r==20: ws.cell(r,5).value='=SUM(E18:E19)'; ws.cell(r,5).number_format='0.00%'; ws.cell(r,5).alignment=Alignment(horizontal='right',vertical='center',wrap_text=False)
-    ws.cell(20,3).value='=C18+C19'
-    ws.cell(22,2).value='* AR to include current month delinquency beginning 10th of each month'
-    for c in range(2,8): ws.cell(22,c).border=AB; ws.cell(22,c).font=f9
-    ws.cell(25,2).value='NTV'; ws.cell(25,2).font=f9b; ws.cell(25,2).fill=gfill(NTV_BLUE)
-    ws.cell(25,2).border=Border(top=T,bottom=T,left=T,right=T); ws.cell(25,3).border=Border(top=T,bottom=T,right=T)
+    
+    # =========================================================================
+    # COL A — left-margin spacer with right border (A1:A56)
+    # =========================================================================
+    for r in range(1, 57):
+        ws.cell(r, 1).border = BR
+        ws.cell(r, 1).font = f9
+    
+    # =========================================================================
+    # SECTION 1: Title block (rows 1-3) — merge B:H, blue, bold, centered, AB
+    # =========================================================================
+    title_lines = [
+        src_vals.get((1, 2), prop.split('(')[0].strip()),
+        src_vals.get((2, 2), 'Occupancy & Delinquency Summary'),
+        date,
+    ]
+    for i, txt in enumerate(title_lines):
+        r = i + 1
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=8)
+        for c in range(2, 9):
+            cell = ws.cell(r, c)
+            cell.fill = gfill(BLUE)
+            cell.font = f9b
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            cell.border = AB
+        ws.cell(r, 2).value = txt
+    
+    # =========================================================================
+    # SECTION 2: Occupancy waterfall (rows 4-12)
+    # =========================================================================
+    # All cells in rows 4-12 across B:H get borders
+    for r in range(4, 13):
+        for c in range(2, 9):
+            ws.cell(r, c).border = AB
+            ws.cell(r, c).font = f9
+    
+    # Row 4: empty spacer with merged D:H
+    ws.merge_cells(start_row=4, start_column=4, end_row=4, end_column=8)
+    
+    # Row 5: Total Units (B and C plain — NOT blue, NOT bold; D:H merged label)
+    cell_b5 = ws.cell(5, 2); cell_b5.value = total_units
+    cell_b5.font = f9
+    cell_b5.alignment = galign('center'); cell_b5.border = AB
+    cell_c5 = ws.cell(5, 3); cell_c5.value = '=B5/$B$5'
+    cell_c5.font = f9
+    cell_c5.alignment = galign('center'); cell_c5.number_format = '0.00%'; cell_c5.border = AB
+    ws.merge_cells(start_row=5, start_column=4, end_row=5, end_column=8)
+    style(5, 4, 'Total Units', align='left', border=AB)
+    
+    # Rows 6-11: Add/Subtract waterfall lines
+    occ = [
+        (6, 'Subtract', 'Physically Vacant'),
+        (7, 'Add', 'Applications - Approved @ KG'),
+        (8, 'Add', 'Applications - Pending Not Approved @ KG'),
+        (9, 'Add', 'Applications - Site Processing - Not Sent to KG'),
+        (10, 'Subtract', 'Notices to Vacate Not at Legal'),
+        (11, 'Subtract', 'Notices to Vacate @ Legal'),
+    ]
+    for r, lbl, desc in occ:
+        # Col A: Subtract/Add label (left of border, no fill)
+        cell_a = ws.cell(r, 1); cell_a.value = lbl
+        cell_a.font = f9; cell_a.alignment = galign('center')
+        cell_a.border = BR  # just right border for column A
+        # Col B: input cell (blue fill, no value yet, populated below from ua_ws)
+        cell_b = ws.cell(r, 2)
+        cell_b.fill = gfill(BLUE); cell_b.font = f9
+        cell_b.alignment = galign('center'); cell_b.border = AB
+        # Col C: percentage formula
+        style(r, 3, f'=B{r}/$B$5', fmt='0.00%', align='center', border=AB)
+        # Col D:H merged = description
+        ws.merge_cells(start_row=r, start_column=4, end_row=r, end_column=8)
+        style(r, 4, desc, align='left', border=AB)
+    
+    # Row 12: NET LEASED (B and C plain — NOT blue, NOT bold; D:H merged label)
+    cell_b12 = ws.cell(12, 2); cell_b12.value = '=B5+B6+B7+B8+B9+B10+B11'
+    cell_b12.font = f9
+    cell_b12.alignment = galign('center'); cell_b12.border = AB
+    cell_c12 = ws.cell(12, 3); cell_c12.value = '=B12/$B$5'
+    cell_c12.font = f9
+    cell_c12.alignment = galign('center'); cell_c12.number_format = '0.00%'; cell_c12.border = AB
+    ws.merge_cells(start_row=12, start_column=4, end_row=12, end_column=8)
+    style(12, 4, 'NET LEASED ', align='left', border=AB)
+    
+    # =========================================================================
+    # SECTION 3: Delinquency (rows 13-20) — mixed merge widths
+    # =========================================================================
+    # Row 13: blank spacer with merged D:H
+    for c in range(2, 9):
+        ws.cell(13, c).border = AB
+        ws.cell(13, c).font = f9
+    ws.merge_cells(start_row=13, start_column=4, end_row=13, end_column=8)
+    
+    # Row 14: # tenants owing | D:E label | F = eviction count | G = "@ legal" text
+    for c in range(2, 9):
+        ws.cell(14, c).border = AB
+        ws.cell(14, c).font = f9
+    cell_b14 = ws.cell(14, 2)
+    cell_b14.fill = gfill(BLUE); cell_b14.font = f9
+    cell_b14.alignment = galign('center'); cell_b14.border = AB
+    style(14, 3, '=B14/B5', fmt='0.00%', align='center', border=AB)
+    ws.merge_cells(start_row=14, start_column=4, end_row=14, end_column=5)
+    style(14, 4, '# of tenants owing prev. full month rent, including', align='left', border=AB)
+    style(14, 7, '@ legal', align='left', border=AB)
+    
+    # Row 15: blank spacer with merged D:H
+    for c in range(2, 9):
+        ws.cell(15, c).border = AB
+        ws.cell(15, c).font = f9
+    ws.merge_cells(start_row=15, start_column=4, end_row=15, end_column=8)
+    
+    # Row 16: # Physically Occupied | D:H merged label
+    for c in range(2, 9):
+        ws.cell(16, c).border = AB
+        ws.cell(16, c).font = f9
+    cell_b16 = ws.cell(16, 2)
+    cell_b16.font = f9; cell_b16.alignment = galign('center'); cell_b16.border = AB
+    cell_c16 = ws.cell(16, 3)
+    cell_c16.fill = gfill(BLUE); cell_c16.font = f9
+    cell_c16.alignment = galign('center')
+    cell_c16.number_format = '#,##0_);(#,##0)'; cell_c16.border = AB
+    ws.merge_cells(start_row=16, start_column=4, end_row=16, end_column=8)
+    style(16, 4, '# Physically Occupied and Total Leased Rent', align='left', border=AB)
+    
+    # Row 17: blank spacer with merged D:H
+    for c in range(2, 9):
+        ws.cell(17, c).border = AB
+        ws.cell(17, c).font = f9
+    ws.merge_cells(start_row=17, start_column=4, end_row=17, end_column=8)
+    
+    # Rows 18-20: AR section (D:E merged label, F:H merged percentage)
+    AR_FMT = '_([$$-409]* #,##0.00_);_([$$-409]* \\(#,##0.00\\);_([$$-409]* "-"??_);_(@_)'
+    ar_rows = [
+        (18, 'Tenant Accounts Receivable (AR)', '=C18/C16', True),
+        (19, 'Subsidy Accounts Receivable (AR) ', '=C19/C16', True),
+        (20, 'Total  AR', '=SUM(F18:F19)', False),
+    ]
+    for r, desc, pct_formula, blue_input in ar_rows:
+        for c in range(2, 9):
+            ws.cell(r, c).border = AB
+            ws.cell(r, c).font = f9
+        # Col B: empty
+        ws.cell(r, 2).border = AB
+        # Col C: AR currency value
+        cell_c = ws.cell(r, 3)
+        if blue_input:
+            cell_c.fill = gfill(BLUE)
+        cell_c.font = f9
+        cell_c.alignment = galign('center')
+        cell_c.number_format = AR_FMT
+        cell_c.border = AB
+        # D:E merged label
+        ws.merge_cells(start_row=r, start_column=4, end_row=r, end_column=5)
+        style(r, 4, desc, align='left', border=AB)
+        # F:H merged percentage
+        ws.merge_cells(start_row=r, start_column=6, end_row=r, end_column=8)
+        style(r, 6, pct_formula, fmt='0.00%', align='right', border=AB)
+    # Total AR sum (C20)
+    ws.cell(20, 3).value = '=SUM(C18:C19)'
+    
+    # =========================================================================
+    # SECTION 4: Footnote (rows 21-22) — merge B:H both rows
+    # =========================================================================
+    ws.merge_cells(start_row=21, start_column=2, end_row=21, end_column=8)
+    for c in range(2, 9):
+        ws.cell(21, c).border = AB
+        ws.cell(21, c).font = f9
+    
+    ws.merge_cells(start_row=22, start_column=2, end_row=22, end_column=8)
+    for c in range(2, 9):
+        ws.cell(22, c).border = AB
+        ws.cell(22, c).font = f9
+    style(22, 2, '* AR to include current month delinquency beginning 10th of each month', align='left', border=AB)
+    
+    # =========================================================================
+    # SECTION 5: NTV table (rows 25-28) — B25:D28 box
+    # =========================================================================
+    # Row 25: NTV header merged B:C, blue+bold
     ws.merge_cells('B25:C25')
-    ws.cell(26,2).value='Unit #'; ws.cell(26,2).font=f9b; ws.cell(26,2).fill=gfill(NTV_BLUE)
-    ws.cell(26,2).border=Border(bottom=T,left=T,right=T); ws.cell(26,2).alignment=galign('center')
-    ws.cell(26,3).value='Move-in year'; ws.cell(26,3).font=f9b; ws.cell(26,3).fill=gfill(NTV_BLUE)
-    ws.cell(26,3).border=Border(bottom=T,left=T,right=T); ws.cell(26,3).alignment=galign('center')
-    for r in range(27,50):
-        v2=src_vals.get((r,2)); v3=src_vals.get((r,3))
-        ws.cell(r,2).border=AB; ws.cell(r,2).font=f9
-        ws.cell(r,3).border=AB; ws.cell(r,3).font=f9
-        if v2: ws.cell(r,2).value=v2; ws.cell(r,2).alignment=galign('left')
-        if v3:
-            ws.cell(r,3).value=v3; ws.cell(r,3).number_format='MM/DD/YY'
-            ws.cell(r,3).alignment=Alignment(horizontal='center',vertical='center',wrap_text=False)
-    ws['B3']=date
-    occ_count=0
-    if ua_ws:
-        V=N=kA=kP=sP=leased=0
-        for r in range(8,ua_ws.max_row+1):
-            st=str(ua_ws.cell(r,1).value or '').strip()
-            if st=='Vacant': V+=1
-            if st=='Notice': N+=1
-            if st in ('Vacant','Notice'):
-                if ua_ws.cell(r,5).value: kA+=1
-                if ua_ws.cell(r,6).value: kP+=1
-                if ua_ws.cell(r,7).value: sP+=1
-            if st=='Occupied': occ_count+=1
-            if st in ('Occupied','Notice'):
-                try: leased+=float(ua_ws.cell(r,9).value or 0)
-                except: pass
-        ws['B6']=-V; ws['B7']=kA; ws['B8']=kP; ws['B9']=sP; ws['B10']=-N
-        ws.cell(16,2).value=occ_count
-        if rr_ws:
-            rr_leased=0
-            for rr_r in range(6,rr_ws.max_row+1):
-                rr_name=str(rr_ws.cell(rr_r,4).value or '').strip()
-                if 'VACANT' in rr_name.upper() or not rr_name: continue
-                if rr_ws.cell(rr_r,1).value is None: continue
-                try: rr_leased+=float(rr_ws.cell(rr_r,10).value or 0)
-                except: pass
-            ws['C16']=rr_leased
-        else:
-            ws['C16']=leased
-    if tar_ws:
-        ev=b14=f14=0
-        for r in range(7,tar_ws.max_row+1):
-            if str(tar_ws.cell(r,1).value or '').lower()=='total': break
-            st=str(tar_ws.cell(r,3).value or '').strip().lower()
-            if st in ('eviction','past'): ev+=1; f14+=1
-            try:
-                p31=float(tar_ws.cell(r,7).value or 0); p61=float(tar_ws.cell(r,8).value or 0)
-                p90=float(tar_ws.cell(r,9).value or 0); cur=float(tar_ws.cell(r,6).value or 0)
-                if p31+p61+p90>0 and cur>0 and p31+p61+p90>=cur: b14+=1
-            except: pass
-        ws['B11']=-ev; ws['B14']=b14; ws['F14']=f14
-    def getT(aw):
-        if not aw: return 0
-        for r in range(7,aw.max_row+1):
-            if str(aw.cell(r,1).value or '').lower()=='total':
-                try: return float(aw.cell(r,5).value or 0)
-                except: return 0
-        return 0
-    if tar_total==0 and tar_ws: tar_total=getT(tar_ws)
-    if sar_total==0 and sar_ws: sar_total=getT(sar_ws)
-    ws['C18']=tar_total; ws['C19']=sar_total
-    ws.cell(20,3).value=tar_total+sar_total
-    if ws['C16'].value and float(ws['C16'].value or 0)>0:
-        leased_val=float(ws['C16'].value)
-        ws.cell(18,5).value=tar_total/leased_val if leased_val else 0
-        ws.cell(19,5).value=sar_total/leased_val if leased_val else 0
-        ws.cell(20,5).value=(tar_total+sar_total)/leased_val if leased_val else 0
+    style(25, 2, 'NTV', fill=BLUE, bold=True, align='center', border=AB)
+    ws.cell(25, 3).fill = gfill(BLUE); ws.cell(25, 3).border = AB
+    
+    # Row 26: sub-headers
+    style(26, 2, 'Unit #', fill=BLUE, bold=True, align='center', border=AB)
+    style(26, 3, 'Move-in year', fill=BLUE, bold=True, align='center', border=AB)
+    
+    # Rows 27-28: NTV data (only border filled rows)
+    for r in (27, 28):
+        v2 = src_vals.get((r, 2)); v3 = src_vals.get((r, 3))
+        if v2 or v3:
+            cell_b = ws.cell(r, 2)
+            if v2:
+                cell_b.value = v2
+                cell_b.alignment = galign('center')
+            cell_b.font = f9; cell_b.border = AB
+            cell_c = ws.cell(r, 3)
+            if v3:
+                cell_c.value = v3
+                cell_c.number_format = 'MM/DD/YY'
+                cell_c.alignment = galign('center')
+            cell_c.font = f9; cell_c.border = AB
+    
+    # =========================================================================
+    # SECTION 6: Weekly Traffic (rows 25-31, cols E-J)
+    # =========================================================================
     if traffic_data:
-        TR_COL = 5
+        TR_COL = 5  # column E
         TR_COLS = 6
-        tr_hdrs = ['Source','Leads','Prospects','Visits','Leases','Applications']
-        active_sources = [(src, vals) for src, vals in traffic_data['rows'] if any(v!=0 for v in vals)]
+        tr_hdrs = ['Source', 'Leads', 'Prospects', 'Visits', 'Leases', 'Applications']
+        active_sources = [(s, v) for s, v in traffic_data['rows'] if any(x != 0 for x in v)]
         date_range = traffic_data.get('date_range', date)
-
-        for c in range(TR_COL, TR_COL+TR_COLS):
-            ws.cell(25,c).fill=gfill(HDR_BLUE); ws.cell(25,c).font=f9b
-            ws.cell(25,c).alignment=galign('center')
-            ws.cell(25,c).border=Border(top=T,bottom=T,left=T if c==TR_COL else None,right=T if c==TR_COL+TR_COLS-1 else None)
-        ws.cell(25,TR_COL).value=f'Weekly Traffic  " {date_range} "'
-        ws.merge_cells(start_row=25,start_column=TR_COL,end_row=25,end_column=TR_COL+TR_COLS-1)
-
-        for i,h in enumerate(tr_hdrs):
-            c = TR_COL+i
-            ws.cell(26,c).value=h; ws.cell(26,c).font=f9b
-            ws.cell(26,c).fill=gfill(GRAY_HDR)
-            ws.cell(26,c).alignment=Alignment(horizontal='center' if i>0 else 'left',vertical='center')
-            ws.cell(26,c).border=bblack()
-
-        tr_rn = 27
+        
+        # Row 25: Title strip merged E:J
+        ws.merge_cells(start_row=25, start_column=TR_COL,
+                       end_row=25, end_column=TR_COL + TR_COLS - 1)
+        for c in range(TR_COL, TR_COL + TR_COLS):
+            cell = ws.cell(25, c)
+            cell.fill = gfill(BLUE); cell.font = f9b
+            cell.alignment = galign('center'); cell.border = AB
+        ws.cell(25, TR_COL).value = f'Weekly Traffic  " {date_range} "'
+        
+        # Row 26: sub-headers
+        for i, h in enumerate(tr_hdrs):
+            style(26, TR_COL + i, h, fill=BLUE, bold=True, align='center', border=AB)
+        
+        # Data rows
+        rn = 27
         for src, vals in active_sources:
-            ws.cell(tr_rn,TR_COL).value=src; ws.cell(tr_rn,TR_COL).font=f9
-            ws.cell(tr_rn,TR_COL).fill=gfill(WHITE)
-            ws.cell(tr_rn,TR_COL).alignment=Alignment(horizontal='left',vertical='center')
-            ws.cell(tr_rn,TR_COL).border=bgray()
-            for i,v in enumerate(vals):
-                c=TR_COL+1+i
-                ws.cell(tr_rn,c).value=v; ws.cell(tr_rn,c).font=f9
-                ws.cell(tr_rn,c).fill=gfill(WHITE)
-                ws.cell(tr_rn,c).alignment=Alignment(horizontal='center',vertical='center')
-                ws.cell(tr_rn,c).border=bgray(); ws.cell(tr_rn,c).number_format='0'
-            ws.row_dimensions[tr_rn].height=15.0; tr_rn+=1
-
-        tr_data_start=27; tr_data_end=tr_rn-1
-        ws.cell(tr_rn,TR_COL).value='Total'; ws.cell(tr_rn,TR_COL).font=f9b
-        ws.cell(tr_rn,TR_COL).fill=gfill(GRAY_HDR)
-        ws.cell(tr_rn,TR_COL).alignment=Alignment(horizontal='center',vertical='center')
-        ws.cell(tr_rn,TR_COL).border=bblack()
-        for i in range(1,TR_COLS):
-            c=TR_COL+i
-            ws.cell(tr_rn,c).value=f'=SUM({get_column_letter(c)}{tr_data_start}:{get_column_letter(c)}{tr_data_end})'
-            ws.cell(tr_rn,c).font=f9b; ws.cell(tr_rn,c).fill=gfill(GRAY_HDR)
-            ws.cell(tr_rn,c).alignment=Alignment(horizontal='center',vertical='center')
-            ws.cell(tr_rn,c).border=bblack(); ws.cell(tr_rn,c).number_format='0'
-        ws.row_dimensions[tr_rn].height=15.0
-
-    # ---- Expiring Leases (120 days) summary block on Weekly Summary, below Weekly Traffic ----
+            style(rn, TR_COL, src, align='left', border=AB)
+            for i, v in enumerate(vals):
+                style(rn, TR_COL + 1 + i, v, align='center', border=AB, fmt='0')
+            rn += 1
+        
+        # Total row
+        tr_data_start = 27
+        tr_data_end = rn - 1
+        style(rn, TR_COL, 'Total', fill=BLUE, bold=True, align='center', border=AB)
+        for i in range(1, TR_COLS):
+            c = TR_COL + i
+            cl = get_column_letter(c)
+            style(rn, c, f'=SUM({cl}{tr_data_start}:{cl}{tr_data_end})',
+                  fill=BLUE, bold=True, align='center', border=AB, fmt='0')
+    
+    # =========================================================================
+    # SECTION 7: Expiring Leases (rows 33-56)
+    # =========================================================================
     if expiring_rows:
         monthly = build_monthly_counts(expiring_rows)
-        EX_COL = 5  # column E, same left edge as Weekly Traffic
-        # Anchor below the traffic block when present, otherwise start at row 27
-        if traffic_data:
-            try:
-                anchor_row = tr_rn  # last row of traffic block
-            except NameError:
-                anchor_row = 26
-        else:
-            anchor_row = 26
-        ex_start_row = anchor_row + 2
-
-        # Header strip merged across 2 cols
-        ws.merge_cells(start_row=ex_start_row, start_column=EX_COL, end_row=ex_start_row, end_column=EX_COL+1)
-        h = ws.cell(ex_start_row, EX_COL, value='Expiring Leases (120 days)')
-        h.fill = gfill(NTV_BLUE)
-        h.font = f9b
-        h.alignment = galign('center')
-        h.border = bblack()
-        ws.cell(ex_start_row, EX_COL+1).border = bblack()
-
-        # Sub-headers: Month | Count
-        sub_r = ex_start_row + 1
-        for col, lbl in [(EX_COL, 'Month'), (EX_COL+1, 'Count')]:
-            c = ws.cell(sub_r, col, value=lbl)
-            c.fill = gfill(NTV_BLUE)
-            c.font = f9b
-            c.alignment = galign('center')
-            c.border = bblack()
-
-        # Data rows
+        EX_COL = 2  # column B
+        ex_start = 33
+        
+        # B33:C33 merged header
+        ws.merge_cells(start_row=ex_start, start_column=EX_COL,
+                       end_row=ex_start, end_column=EX_COL + 1)
+        style(ex_start, EX_COL, 'Expiring Leases (120 days)',
+              fill=BLUE, bold=True, align='center', border=AB)
+        ws.cell(ex_start, EX_COL + 1).fill = gfill(BLUE)
+        ws.cell(ex_start, EX_COL + 1).border = AB
+        
+        # Sub-headers
+        sub_r = ex_start + 1
+        style(sub_r, EX_COL, 'Month', fill=BLUE, bold=True, align='center', border=AB)
+        style(sub_r, EX_COL + 1, 'Count', fill=BLUE, bold=True, align='center', border=AB)
+        
+        # Data
         data_start = sub_r + 1
         for i, (m, cnt) in enumerate(monthly):
-            rr = data_start + i
-            cm = ws.cell(rr, EX_COL, value=m)
-            cm.font = f9
-            cm.alignment = galign('left')
-            cm.border = bgray()
-            cc = ws.cell(rr, EX_COL+1, value=cnt)
-            cc.font = f9
-            cc.alignment = galign('center')
-            cc.border = bgray()
-            cc.number_format = '0'
-
-        # Total row
-        total_rr = data_start + len(monthly)
-        last_data_rr = total_rr - 1 if monthly else data_start
-        count_letter = get_column_letter(EX_COL+1)
-
-        tl = ws.cell(total_rr, EX_COL, value='Total')
-        tl.fill = gfill(NTV_BLUE)
-        tl.font = f9b
-        tl.alignment = galign('center')
-        tl.border = bblack()
-
+            r = data_start + i
+            style(r, EX_COL, m, align='center', border=AB)
+            style(r, EX_COL + 1, cnt, align='center', border=AB, fmt='0')
+        
+        # Total
+        total_r = data_start + len(monthly)
+        last_data_r = total_r - 1 if monthly else data_start
+        style(total_r, EX_COL, 'Total', fill=BLUE, bold=True, align='center', border=AB)
         if monthly:
-            tc = ws.cell(total_rr, EX_COL+1,
-                         value=f'=SUM({count_letter}{data_start}:{count_letter}{last_data_rr})')
+            count_letter = get_column_letter(EX_COL + 1)
+            style(total_r, EX_COL + 1,
+                  f'=SUM({count_letter}{data_start}:{count_letter}{last_data_r})',
+                  fill=BLUE, bold=True, align='center', border=AB, fmt='0')
         else:
-            tc = ws.cell(total_rr, EX_COL+1, value=0)
-        tc.fill = gfill(NTV_BLUE)
-        tc.font = f9b
-        tc.alignment = galign('center')
-        tc.border = bblack()
-        tc.number_format = '0'
+            style(total_r, EX_COL + 1, 0, fill=BLUE, bold=True, align='center', border=AB, fmt='0')
+    
+    # =========================================================================
+    # =========================================================================
+    # (No gutter trick — column E is wide and holds Weekly Traffic data;
+    #  no borders needed on column D or E in rows 25-56)
+    # =========================================================================
+    
+    # =========================================================================
+    # Compute and fill values from input data
+    # =========================================================================
+    ws['B3'] = date
+    
+    occ_count = 0
+    if ua_ws:
+        V = N = kA = kP = sP = leased = 0
+        for r in range(8, ua_ws.max_row + 1):
+            st = str(ua_ws.cell(r, 1).value or '').strip()
+            if st == 'Vacant': V += 1
+            if st == 'Notice': N += 1
+            if st in ('Vacant', 'Notice'):
+                if ua_ws.cell(r, 5).value: kA += 1
+                if ua_ws.cell(r, 6).value: kP += 1
+                if ua_ws.cell(r, 7).value: sP += 1
+            if st == 'Occupied': occ_count += 1
+            if st in ('Occupied', 'Notice'):
+                try: leased += float(ua_ws.cell(r, 9).value or 0)
+                except: pass
+        ws['B6'] = -V; ws['B7'] = kA; ws['B8'] = kP; ws['B9'] = sP; ws['B10'] = -N
+        ws.cell(16, 2).value = occ_count
+        if rr_ws:
+            rr_leased = 0
+            for rr_r in range(6, rr_ws.max_row + 1):
+                rr_name = str(rr_ws.cell(rr_r, 4).value or '').strip()
+                if 'VACANT' in rr_name.upper() or not rr_name: continue
+                if rr_ws.cell(rr_r, 1).value is None: continue
+                try: rr_leased += float(rr_ws.cell(rr_r, 10).value or 0)
+                except: pass
+            ws['C16'] = rr_leased
+        else:
+            ws['C16'] = leased
+    
+    if tar_ws:
+        ev = b14 = f14 = 0
+        for r in range(7, tar_ws.max_row + 1):
+            if str(tar_ws.cell(r, 1).value or '').lower() == 'total': break
+            st = str(tar_ws.cell(r, 3).value or '').strip().lower()
+            if st in ('eviction', 'past'): ev += 1; f14 += 1
+            try:
+                p31 = float(tar_ws.cell(r, 7).value or 0); p61 = float(tar_ws.cell(r, 8).value or 0)
+                p90 = float(tar_ws.cell(r, 9).value or 0); cur = float(tar_ws.cell(r, 6).value or 0)
+                if p31 + p61 + p90 > 0 and cur > 0 and p31 + p61 + p90 >= cur: b14 += 1
+            except: pass
+        ws['B11'] = -ev; ws['B14'] = b14; ws['F14'] = f14
+    
+    def getT(aw):
+        if not aw: return 0
+        for r in range(7, aw.max_row + 1):
+            if str(aw.cell(r, 1).value or '').lower() == 'total':
+                try: return float(aw.cell(r, 5).value or 0)
+                except: return 0
+        return 0
+    if tar_total == 0 and tar_ws: tar_total = getT(tar_ws)
+    if sar_total == 0 and sar_ws: sar_total = getT(sar_ws)
+    ws['C18'] = tar_total
+    ws['C19'] = sar_total
+    
+    # =========================================================================
+    # Column widths
+    # =========================================================================
+    widths = {
+        'A': 16.57,   # 121px
+        'B': 14.43,   # 106px
+        'C': 15.43,   # 113px
+        'D': 2.71,    # 24px — narrow gutter between B-C and E
+        'E': 24.14,   # 174px — wide for Weekly Traffic Source / Property Website
+        'F': 10.00,   # 75px — Leads
+        # G defaults to ~96px (no override)
+        'H': 8.00,    # 61px — Visits
+        # I defaults to ~96px (no override)
+        'J': 12.00,   # 89px — Applications
+    }
+    for col, w in widths.items():
+        ws.column_dimensions[col].width = w
 
-    for col,w in {'A':16.57,'B':14.43,'C':15.43,'D':41.43,'E':22,'F':7,'G':10,'H':7,'I':7,'J':10}.items():
-        ws.column_dimensions[col].width=w
-    for r,h in [(1,12),(2,12),(3,12),(4,12),(5,12),(6,12),(7,15.75),(8,15.75),(9,15.75),(10,15.75),(11,15.75),(12,15.75),(13,15.75),(14,12),(15,15.75),(16,16.5),(17,15.75),(18,12),(19,15.75),(20,12),(21,12),(22,12),(25,16.5)]:
-        ws.row_dimensions[r].height=h
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.16'})
+    return jsonify({'status':'ok','version':'9.38'})
 
 @app.route('/')
 def index():
@@ -1235,7 +1386,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.16</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.38</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
