@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.43 — All Weekly Summary blocks side-by-side, unified blue palette, NTV centered"""
+"""Weekly Report Formatter v9.44 — All Weekly Summary blocks side-by-side, unified blue palette, NTV centered"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -561,26 +561,72 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
     return ws, len(V), len(O)
 
 # ============================================================================
-# EXPIRING LEASES (120 days) - new in v9.43
+# EXPIRING LEASES (120 days) - new in v9.44
 # ============================================================================
 def parse_expiring(raw_bytes):
-    """Parse Yardi Expiring Leases export. Returns list of dict rows, sorted oldest -> newest."""
+    """Parse Yardi Expiring Leases export. Returns list of dict rows, sorted oldest -> newest.
+    Robust to variations in header text, header position, and date format (text or datetime)."""
     wb = openpyxl.load_workbook(io.BytesIO(raw_bytes), data_only=True, read_only=True)
     ws = wb.active
     headers, rows = None, []
+    header_keywords = ('lease expires', 'lease expiration', 'expires', 'lease end', 'expiration date')
+    
+    def parse_date(val):
+        """Convert val to datetime if possible. Handles datetime, date, and various text formats."""
+        if val is None:
+            return None
+        if isinstance(val, datetime):
+            return val
+        # Handle date object (without time)
+        try:
+            from datetime import date as date_cls
+            if isinstance(val, date_cls):
+                return datetime(val.year, val.month, val.day)
+        except: pass
+        if isinstance(val, str):
+            s = val.strip()
+            if not s:
+                return None
+            # Try several common date formats
+            for fmt in ('%m/%d/%Y', '%m/%d/%y', '%Y-%m-%d', '%m-%d-%Y', '%m-%d-%y',
+                        '%d/%m/%Y', '%b %d, %Y', '%B %d, %Y', '%m/%d/%Y %H:%M:%S'):
+                try:
+                    return datetime.strptime(s, fmt)
+                except: pass
+        return None
+    
     for r in ws.iter_rows(values_only=True):
         if headers is None:
-            if r and r[0] and str(r[0]).strip().lower().startswith('lease expires'):
-                headers = [str(h).strip() if h is not None else '' for h in r]
+            # Look for any cell in the row that matches one of the header keywords
+            if r:
+                row_lower = [str(c).strip().lower() if c is not None else '' for c in r]
+                if any(any(kw in cell for kw in header_keywords) for cell in row_lower):
+                    headers = [str(h).strip() if h is not None else '' for h in r]
+                    # Find the index of the "Lease Expires" / similar column
+                    for i, cell in enumerate(row_lower):
+                        if any(kw in cell for kw in header_keywords):
+                            expires_col_idx = i
+                            break
+                    else:
+                        expires_col_idx = 0
             continue
         if not r or all(v is None or (isinstance(v, str) and not v.strip()) for v in r):
             continue
-        first = r[0]
-        if isinstance(first, str) and any(k in first.lower() for k in ('total','grand','summary','village at')):
-            continue
-        if not isinstance(first, datetime):
-            continue
-        rows.append({headers[i]: r[i] if i < len(r) else None for i in range(len(headers))})
+        # Skip total/summary rows: check the first few columns for signal words
+        for chk_idx in range(min(3, len(r))):
+            chk = r[chk_idx]
+            if isinstance(chk, str) and any(k in chk.lower() for k in ('total', 'grand', 'summary', 'village at')):
+                break
+        else:
+            # No skip-keyword found in first 3 cols; try to parse the date
+            date_val = r[expires_col_idx] if expires_col_idx < len(r) else None
+            parsed = parse_date(date_val)
+            if parsed is None:
+                continue
+            row_dict = {headers[i]: r[i] if i < len(r) else None for i in range(len(headers))}
+            # Normalize: ensure 'Lease Expires' key exists with parsed datetime
+            row_dict['Lease Expires'] = parsed
+            rows.append(row_dict)
     wb.close()
     rows.sort(key=lambda x: x.get('Lease Expires') or datetime.max)
     return rows
@@ -1285,7 +1331,7 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.43'})
+    return jsonify({'status':'ok','version':'9.44'})
 
 @app.route('/')
 def index():
@@ -1433,7 +1479,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.43</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.44</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
