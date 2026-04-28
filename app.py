@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.44 — All Weekly Summary blocks side-by-side, unified blue palette, NTV centered"""
+"""Weekly Report Formatter v9.49 — All Weekly Summary blocks side-by-side, unified blue palette, NTV centered"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -561,7 +561,7 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
     return ws, len(V), len(O)
 
 # ============================================================================
-# EXPIRING LEASES (120 days) - new in v9.44
+# EXPIRING LEASES (120 days) - new in v9.49
 # ============================================================================
 def parse_expiring(raw_bytes):
     """Parse Yardi Expiring Leases export. Returns list of dict rows, sorted oldest -> newest.
@@ -1329,9 +1329,229 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
         ws.column_dimensions[col].width = w
 
 
+def build_manager_summary(wb_out, date, prop, ws_summary, traffic_data=None, expiring_rows=None):
+    """
+    Build a manager-friendly bullet-point summary tab using values already computed
+    on the Weekly Summary tab. Last tab in workbook.
+    """
+    BLUE = 'FFBDD7EE'
+    tab_name = f'Manager Summary {date}'
+    if tab_name in wb_out.sheetnames:
+        del wb_out[tab_name]
+    ws = wb_out.create_sheet(tab_name)
+    
+    f10 = gfont(sz=10)
+    f10b = gfont(bold=True, sz=10)
+    f12b = gfont(bold=True, sz=12)
+    f14b = gfont(bold=True, sz=14)
+    AB = bblack()
+    
+    def get_val(coord):
+        v = ws_summary[coord].value
+        if v is None: return 0
+        if isinstance(v, (int, float)): return v
+        try: return float(v)
+        except: return 0
+    
+    def fmt_num(n):
+        try: return f"{int(n):,}" if abs(n - int(n)) < 0.01 else f"{n:,.2f}"
+        except: return str(n)
+    
+    def fmt_pct(num, denom):
+        if not denom: return "0.00%"
+        return f"{(num / denom * 100):.2f}%"
+    
+    def fmt_money(n):
+        try: return f"${float(n):,.2f}"
+        except: return f"${n}"
+    
+    # Pull values from Weekly Summary
+    total_units = get_val('B5')
+    physically_vacant = abs(get_val('B6'))
+    kg_approved = get_val('B7')
+    kg_pending = get_val('B8')
+    site_processing = get_val('B9')
+    ntv_not_legal = abs(get_val('B10'))
+    ntv_at_legal = abs(get_val('B11'))
+    net_leased = get_val('B12')
+    tenants_unpaid_full = get_val('B14')
+    at_legal = get_val('F14')
+    physically_occupied = get_val('B16')
+    total_leased_rent = get_val('C16')
+    tenant_ar = get_val('C18')
+    subsidy_ar = get_val('C19')
+    total_ar = tenant_ar + subsidy_ar
+    
+    # Title block (rows 1-3): merged A:E, bold blue centered
+    for r in range(1, 4):
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
+        for c in range(1, 6):
+            cell = ws.cell(r, c)
+            cell.fill = gfill(BLUE)
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            cell.border = AB
+    ws.cell(1, 1).value = prop.split('(')[0].strip()
+    ws.cell(1, 1).font = f14b
+    ws.cell(2, 1).value = 'Manager Summary'
+    ws.cell(2, 1).font = f12b
+    ws.cell(3, 1).value = date
+    ws.cell(3, 1).font = f10b
+    
+    # Section header helper
+    def section_header(row, text):
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=5)
+        cell = ws.cell(row, 1)
+        cell.value = text
+        cell.font = f12b
+        cell.fill = gfill(BLUE)
+        cell.alignment = Alignment(horizontal='left', vertical='center', indent=1)
+        for c in range(1, 6):
+            ws.cell(row, c).border = AB
+    
+    # Bullet helper
+    def bullet(row, text):
+        cell = ws.cell(row, 1)
+        cell.value = f"  •  {text}"
+        cell.font = f10
+        cell.alignment = Alignment(horizontal='left', vertical='center', indent=1)
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=5)
+    
+    def ask_questions(row):
+        """Add an italic 'Any questions here?' prompt at the end of each category."""
+        cell = ws.cell(row, 1)
+        cell.value = "Any questions here?"
+        cell.font = Font(name='Calibri', size=10, italic=True, color='FF595959')
+        cell.alignment = Alignment(horizontal='left', vertical='center', indent=2)
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=5)
+    
+    r = 5
+    
+    # === INTRO LINE (verbal-style summary for the manager to read off) ===
+    prop_short = prop.split('(')[0].strip()
+    leased_pct = fmt_pct(net_leased, total_units)
+    occupied_pct = fmt_pct(physically_occupied, total_units)
+    intro_text = f"As for {prop_short} we are currently at {leased_pct} leased, {occupied_pct} occupied"
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
+    intro_cell = ws.cell(r, 1)
+    intro_cell.value = intro_text
+    intro_cell.font = gfont(bold=True, sz=11)
+    intro_cell.alignment = Alignment(horizontal='left', vertical='center', indent=1)
+    r += 1
+    r += 1  # blank line before first section
+    
+    # === OCCUPANCY SECTION ===
+    section_header(r, 'AS FOR OCCUPANCY')
+    r += 1
+    bullet(r, f"Total Units: {fmt_num(total_units)}"); r += 1
+    bullet(r, f"Physically Occupied: {fmt_num(physically_occupied)} units ({fmt_pct(physically_occupied, total_units)})"); r += 1
+    bullet(r, f"Physically Vacant: {fmt_num(physically_vacant)} units ({fmt_pct(physically_vacant, total_units)})"); r += 1
+    bullet(r, f"Net Leased: {fmt_num(net_leased)} units ({fmt_pct(net_leased, total_units)})"); r += 1
+    ask_questions(r); r += 1
+    r += 1
+    
+    # === APPLICATIONS / PIPELINE ===
+    section_header(r, 'AS FOR THE APPLICATIONS PIPELINE')
+    r += 1
+    bullet(r, f"Approved @ KG: {fmt_num(kg_approved)}"); r += 1
+    bullet(r, f"Pending Not Approved @ KG: {fmt_num(kg_pending)}"); r += 1
+    bullet(r, f"Site Processing - Not Sent to KG: {fmt_num(site_processing)}"); r += 1
+    ask_questions(r); r += 1
+    r += 1
+    
+    # === NOTICES TO VACATE ===
+    section_header(r, 'NOTICES TO VACATE')
+    r += 1
+    bullet(r, f"Notices to Vacate Not at Legal: {fmt_num(ntv_not_legal)}"); r += 1
+    bullet(r, f"Notices to Vacate @ Legal: {fmt_num(ntv_at_legal)}"); r += 1
+    ask_questions(r); r += 1
+    r += 1
+    
+    # === DELINQUENCY ===
+    section_header(r, 'AS FOR DELINQUENCY')
+    r += 1
+    bullet(r, f"Tenants who haven't paid full rent: {fmt_num(tenants_unpaid_full)}"); r += 1
+    bullet(r, f"Tenants @ legal (eviction): {fmt_num(at_legal)}"); r += 1
+    bullet(r, f"Total Leased Rent: {fmt_money(total_leased_rent)}"); r += 1
+    bullet(r, f"Tenant Accounts Receivable (AR): {fmt_money(tenant_ar)} ({fmt_pct(tenant_ar, total_leased_rent)})"); r += 1
+    bullet(r, f"Subsidy Accounts Receivable (AR): {fmt_money(subsidy_ar)} ({fmt_pct(subsidy_ar, total_leased_rent)})"); r += 1
+    bullet(r, f"Total AR: {fmt_money(total_ar)} ({fmt_pct(total_ar, total_leased_rent)})"); r += 1
+    ask_questions(r); r += 1
+    r += 1
+    
+    # === WEEKLY TRAFFIC SECTION ===
+    if traffic_data and traffic_data.get('rows'):
+        date_range = traffic_data.get('date_range', '')
+        title = f'AS FOR WEEKLY TRAFFIC ({date_range})' if date_range else 'AS FOR WEEKLY TRAFFIC'
+        section_header(r, title); r += 1
+        # Tally totals across all sources
+        active_sources = [(s, v) for s, v in traffic_data['rows'] if any(x != 0 for x in v)]
+        total_leads = sum(v[0] for s, v in active_sources)
+        total_pros = sum(v[1] for s, v in active_sources)
+        total_visits = sum(v[2] for s, v in active_sources)
+        total_leases = sum(v[3] for s, v in active_sources)
+        total_apps = sum(v[4] for s, v in active_sources)
+        bullet(r, f"Total Leads: {fmt_num(total_leads)}"); r += 1
+        bullet(r, f"Total Prospects: {fmt_num(total_pros)}"); r += 1
+        bullet(r, f"Total Visits: {fmt_num(total_visits)}"); r += 1
+        bullet(r, f"Total Leases Signed: {fmt_num(total_leases)}"); r += 1
+        bullet(r, f"Total Applications: {fmt_num(total_apps)}"); r += 1
+        # Breakdown by source
+        if active_sources:
+            r += 1
+            for src, vals in active_sources:
+                bullet(r, f"{src}: {fmt_num(vals[0])} leads, {fmt_num(vals[1])} prospects, {fmt_num(vals[2])} visits, {fmt_num(vals[3])} leases, {fmt_num(vals[4])} apps")
+                r += 1
+        ask_questions(r); r += 1
+        r += 1
+    
+    # === EXPIRING LEASES SECTION (day-bucket view) ===
+    if expiring_rows:
+        from datetime import datetime as _dt, timedelta as _td
+        today = _dt.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        past_due = 0
+        within_30 = 0
+        within_60 = 0
+        within_90 = 0
+        within_120 = 0
+        for row in expiring_rows:
+            exp_date = row.get('Lease Expires')
+            if exp_date is None or not isinstance(exp_date, _dt):
+                continue
+            days_until = (exp_date - today).days
+            if days_until < 0:
+                past_due += 1
+            else:
+                # Cumulative buckets
+                if days_until <= 30: within_30 += 1
+                if days_until <= 60: within_60 += 1
+                if days_until <= 90: within_90 += 1
+                if days_until <= 120: within_120 += 1
+        total_expiring = past_due + within_120  # past due + everything in next 120 days
+        section_header(r, 'AND FOR EXPIRING LEASES'); r += 1
+        bullet(r, f"Past due (already expired): {fmt_num(past_due)}"); r += 1
+        bullet(r, f"Expiring within 30 days: {fmt_num(within_30)}"); r += 1
+        bullet(r, f"Expiring within 60 days: {fmt_num(within_60)}"); r += 1
+        bullet(r, f"Expiring within 90 days: {fmt_num(within_90)}"); r += 1
+        bullet(r, f"Expiring within 120 days: {fmt_num(within_120)}"); r += 1
+        ask_questions(r); r += 1
+        r += 1
+    
+    # Footnote
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
+    foot = ws.cell(r, 1)
+    foot.value = "* AR includes current month delinquency beginning the 10th of each month"
+    foot.font = gfont(sz=9)
+    foot.alignment = Alignment(horizontal='left', vertical='center', indent=1)
+    
+    # Column widths
+    ws.column_dimensions['A'].width = 80
+    for col in 'BCDE':
+        ws.column_dimensions[col].width = 12
+
+
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.44'})
+    return jsonify({'status':'ok','version':'9.49'})
 
 @app.route('/')
 def index():
@@ -1399,14 +1619,18 @@ def format_report():
                 traceback.print_exc()
                 expiring_rows = None
         build_weekly_summary(wb_out,wb_ro,date,prop,ua_ws,tar_ws,sar_ws,tar_total,sar_total,rr_ws,traffic_data,expiring_rows,tar_red_count)
+        # Build Manager Summary tab (reads computed values from Weekly Summary)
+        ws_summary_name = next((n for n in wb_out.sheetnames if 'weekly summary' in n.lower()), None)
+        if ws_summary_name:
+            build_manager_summary(wb_out, date, prop, wb_out[ws_summary_name], traffic_data, expiring_rows)
         wb_ro.close()
         def find_tab(names, prefix):
             return next((n for n in names if n.strip().lower().startswith(prefix.lower())), None)
         current=list(wb_out.sheetnames)
         ws_tab=find_tab(current,'weekly summary'); ua_tab=find_tab(current,'unit availability')
         rr_tab=find_tab(current,'rent roll'); tar_tab=find_tab(current,'tenant ar'); sar_tab=find_tab(current,'sub ar')
-        ex_tab=find_tab(current,'expiring leases')
-        desired=[t for t in [ws_tab,ua_tab,rr_tab,tar_tab,sar_tab,ex_tab] if t]
+        ex_tab=find_tab(current,'expiring leases'); mgr_tab=find_tab(current,'manager summary')
+        desired=[t for t in [ws_tab,ua_tab,rr_tab,tar_tab,sar_tab,ex_tab,mgr_tab] if t]
         remaining=[t for t in current if t not in desired]
         ordered=desired+remaining
         for target_i,name in enumerate(ordered):
@@ -1479,7 +1703,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.44</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.49</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
