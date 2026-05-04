@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.50 — Adds Opinionn Reputation block at E34:K43 from Review Summary PDF"""
+"""Weekly Report Formatter v9.51 — Reputation block at E34:K43 (blank inputs for manual entry)"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -921,221 +921,15 @@ def parse_traffic(raw_bytes, date):
     return {'date_range': date_range, 'rows': active}
 
 # ============================================================================
-# REPUTATION (Opinionn Review Summary PDF) - new in v9.50
+# REPUTATION block - new in v9.50, simplified in v9.51
+#
+# Background: The Opinionn Review Summary PDF is a rasterized image (0 chars,
+# 1 image), so text-based PDF parsing returns nothing. Rather than ship OCR
+# (heavy dependency, fragile on Render free tier), we render the block with
+# blank blue input cells. Roman types the numbers from the PDF directly into
+# the spreadsheet each week (~30 seconds), then attaches the PDF to the
+# JEMCOR email separately.
 # ============================================================================
-def parse_review_summary_pdf(raw_bytes):
-    """Parse the Opinionn 'Review Summary' PDF. Returns dict with overall and per-platform metrics.
-    
-    Expected PDF structure (from Reports -> Review Summary):
-      - Top: 'Review Summary' / 'Village at Madrone - FPI Management' / date range / 'All Sources'
-      - Cards row: 'Overall Public Rating' / '3.4' / '70 Reviews', then per-platform cards
-        (Google, Yelp, Apartments.com, Facebook, ApartmentRatings.com, Opiniion)
-      - 'Reviews by Month' chart
-      - Source table: Source | Average Rating | All Time Rating | Positive Reviews | Negative Reviews | Total Reviews
-    
-    Returns:
-      {
-        'overall_rating': float,
-        'overall_total': int,
-        'platforms': {
-          'Google': {'avg_rating': float, 'all_time_rating': float, 'positive': int, 'negative': int, 'total': int},
-          ...
-        }
-      }
-    
-    Returns None if parsing fails for any reason. The block builder handles None gracefully.
-    """
-    try:
-        import pdfplumber
-    except ImportError:
-        return None
-    
-    PLATFORMS = ['Google', 'Apartments.com', 'Yelp', 'Facebook', 'ApartmentRatings.com', 'Opiniion']
-    
-    result = {
-        'overall_rating': 0.0,
-        'overall_total': 0,
-        'platforms': {p: {'avg_rating': 0.0, 'all_time_rating': 0.0,
-                          'positive': 0, 'negative': 0, 'total': 0} for p in PLATFORMS}
-    }
-    
-    try:
-        with pdfplumber.open(io.BytesIO(raw_bytes)) as pdf:
-            if not pdf.pages:
-                return None
-            page = pdf.pages[0]
-            text = page.extract_text() or ''
-            
-            # ===== Parse the cards section =====
-            # Layout: card title on one line, then number with optional star, then "X Reviews"
-            # Examples from real PDF:
-            #   Overall Public Rating
-            #   3.4
-            #   70 Reviews
-            #   Google
-            #   3.5
-            #   53 Reviews
-            
-            lines = [ln.strip() for ln in text.split('\n') if ln.strip()]
-            
-            # Walk through lines looking for card patterns
-            i = 0
-            while i < len(lines):
-                line = lines[i]
-                # Overall Public Rating card
-                if re.search(r'overall\s*public\s*rating', line, re.I):
-                    # Next non-empty line should have the rating, then 'X Reviews'
-                    rating, total = _extract_card_values(lines, i + 1)
-                    if rating is not None:
-                        result['overall_rating'] = rating
-                    if total is not None:
-                        result['overall_total'] = total
-                    i += 1
-                    continue
-                # Per-platform cards
-                matched = False
-                for plat in PLATFORMS:
-                    # Match exact platform name (case-insensitive). Use word boundaries
-                    # to avoid 'Apartments.com' matching inside 'ApartmentRatings.com'.
-                    if line.lower() == plat.lower() or re.fullmatch(rf'\s*{re.escape(plat)}\s*', line, re.I):
-                        rating, total = _extract_card_values(lines, i + 1)
-                        if rating is not None:
-                            result['platforms'][plat]['avg_rating'] = rating
-                        if total is not None:
-                            result['platforms'][plat]['total'] = total
-                        matched = True
-                        i += 1
-                        break
-                if matched:
-                    continue
-                i += 1
-            
-            # ===== Parse the source table =====
-            # Try extracting tables. The Source breakdown table typically has columns:
-            # Source | Average Rating | All Time Rating | Positive Reviews | Negative Reviews | Total Reviews
-            try:
-                tables = page.extract_tables()
-                for tbl in tables or []:
-                    if not tbl or len(tbl) < 2:
-                        continue
-                    # Find a header row that mentions 'Source' and 'Total Reviews' or similar
-                    header_row_idx = None
-                    for hi, row in enumerate(tbl):
-                        if row and any(c and 'source' in str(c).lower() for c in row):
-                            if any(c and 'total' in str(c).lower() for c in row):
-                                header_row_idx = hi
-                                break
-                    if header_row_idx is None:
-                        continue
-                    
-                    # Map column indices
-                    header = [str(c or '').strip().lower() for c in tbl[header_row_idx]]
-                    col_idx = {}
-                    for ci, h in enumerate(header):
-                        if 'source' in h: col_idx['source'] = ci
-                        elif 'average rating' in h or h == 'avg rating': col_idx['avg'] = ci
-                        elif 'all time' in h: col_idx['all_time'] = ci
-                        elif 'positive' in h: col_idx['positive'] = ci
-                        elif 'negative' in h: col_idx['negative'] = ci
-                        elif 'total' in h: col_idx['total'] = ci
-                    
-                    # Walk the data rows
-                    for row in tbl[header_row_idx + 1:]:
-                        if not row or 'source' not in col_idx:
-                            continue
-                        src_cell = row[col_idx['source']] if col_idx['source'] < len(row) else None
-                        if not src_cell:
-                            continue
-                        src_name = str(src_cell).strip()
-                        # Match against canonical platform names
-                        matched_plat = None
-                        for plat in PLATFORMS:
-                            if plat.lower() in src_name.lower() or src_name.lower() in plat.lower():
-                                matched_plat = plat
-                                break
-                        if not matched_plat:
-                            continue
-                        # Pull numeric values, treating dashes/blanks as 0
-                        if 'avg' in col_idx and col_idx['avg'] < len(row):
-                            v = _parse_num(row[col_idx['avg']])
-                            if v is not None:
-                                result['platforms'][matched_plat]['avg_rating'] = v
-                        if 'all_time' in col_idx and col_idx['all_time'] < len(row):
-                            v = _parse_num(row[col_idx['all_time']])
-                            if v is not None:
-                                result['platforms'][matched_plat]['all_time_rating'] = v
-                        if 'positive' in col_idx and col_idx['positive'] < len(row):
-                            v = _parse_num(row[col_idx['positive']])
-                            if v is not None:
-                                result['platforms'][matched_plat]['positive'] = int(v)
-                        if 'negative' in col_idx and col_idx['negative'] < len(row):
-                            v = _parse_num(row[col_idx['negative']])
-                            if v is not None:
-                                result['platforms'][matched_plat]['negative'] = int(v)
-                        if 'total' in col_idx and col_idx['total'] < len(row):
-                            v = _parse_num(row[col_idx['total']])
-                            if v is not None and v > 0:
-                                result['platforms'][matched_plat]['total'] = int(v)
-                    break  # only process the first matching source table
-            except Exception:
-                pass  # table extraction is best-effort; cards are primary source
-        
-        return result
-    except Exception:
-        traceback.print_exc()
-        return None
-
-
-def _extract_card_values(lines, start_idx, max_lookahead=4):
-    """Helper: starting at lines[start_idx], find (rating, total) values from a card.
-    Looks ahead up to max_lookahead lines for a number (rating) and 'X Reviews' (total).
-    Returns (rating_or_None, total_or_None)."""
-    rating = None
-    total = None
-    end = min(start_idx + max_lookahead, len(lines))
-    for j in range(start_idx, end):
-        ln = lines[j].strip()
-        if not ln:
-            continue
-        # Look for "X Reviews" pattern (allow optional decimal but expect integer)
-        m_rev = re.match(r'^([\d,]+)\s*reviews?\b', ln, re.I)
-        if m_rev and total is None:
-            try:
-                total = int(m_rev.group(1).replace(',', ''))
-            except: pass
-            continue
-        # Look for a standalone rating number (1-5 range, may have decimals, may have trailing star/info icon char)
-        m_rate = re.match(r'^([0-5](?:\.[0-9]+)?)\s*[\u2605\*\u24d8]?\s*$', ln)
-        if m_rate and rating is None:
-            try:
-                rating = float(m_rate.group(1))
-            except: pass
-            continue
-        # If the line has "Industry Average" or similar metadata, skip but don't break
-        if 'industry' in ln.lower() or 'average' in ln.lower():
-            continue
-        # If we've found both, stop
-        if rating is not None and total is not None:
-            break
-    return rating, total
-
-
-def _parse_num(val):
-    """Parse a numeric value from a table cell, treating dashes/blanks as None.
-    Returns float or None."""
-    if val is None:
-        return None
-    s = str(val).strip()
-    if not s or s == '-' or s.lower() in ('n/a', 'na'):
-        return None
-    # Strip commas, percentage signs, currency signs
-    s = s.replace(',', '').replace('$', '').replace('%', '').strip()
-    try:
-        return float(s)
-    except:
-        return None
-
-
 def build_reputation_block(ws, reputation_data, start_row=34, start_col=5):
     """Build the Reputation block at E34:K43 (default) on the Weekly Summary tab.
     
@@ -1607,12 +1401,12 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
             style(total_r, EX_COL + 1, 0, fill=BLUE, bold=True, align='center', border=AB, fmt='0')
     
     # =========================================================================
-    # SECTION 8: Reputation block (rows 34-43, cols E-K) — new in v9.50
+    # SECTION 8: Reputation block (rows 34-43, cols E-K) — added in v9.50
     # =========================================================================
     # Builds at E34:K43, in the same column band as Weekly Traffic so it sits
-    # naturally below the traffic table. Pulls from Opinionn Review Summary PDF
-    # via parse_review_summary_pdf(). If no PDF is uploaded or parsing fails,
-    # reputation_data is None and the block renders with zeros for manual entry.
+    # naturally below the traffic table. Renders with blank blue input cells
+    # for manual entry (the Opinionn PDF is rasterized so auto-parse isn't
+    # possible; Roman types the numbers from the PDF into the cells each week).
     build_reputation_block(ws, reputation_data, start_row=34, start_col=5)
     
     # =========================================================================
@@ -1907,24 +1701,12 @@ def build_manager_summary(wb_out, date, prop, ws_summary, traffic_data=None, exp
         ask_questions(r); r += 1
         r += 1
     
-    # === REPUTATION SECTION (Opinionn) — new in v9.50 ===
-    if reputation_data:
-        section_header(r, 'AS FOR REPUTATION (OPINIONN)'); r += 1
-        overall_rating = reputation_data.get('overall_rating') or 0
-        overall_total = reputation_data.get('overall_total') or 0
-        bullet(r, f"Overall Public Rating: {overall_rating:.1f} stars across {fmt_num(overall_total)} total reviews"); r += 1
-        bullet(r, f"Industry Average: 3.9 stars"); r += 1
-        # Active platforms (where total > 0)
-        active_plats = [(p, d) for p, d in reputation_data.get('platforms', {}).items()
-                        if d.get('total', 0) > 0]
-        if active_plats:
-            r += 1
-            for plat, d in active_plats:
-                avg = d.get('avg_rating') or 0
-                tot = d.get('total') or 0
-                bullet(r, f"{plat}: {avg:.1f} stars, {fmt_num(tot)} reviews"); r += 1
-        ask_questions(r); r += 1
-        r += 1
+    # === REPUTATION SECTION ===
+    # NOTE: Removed in v9.51. The Reputation block on Weekly Summary is filled
+    # in manually by the user AFTER the formatter runs (PDF is rasterized so
+    # auto-parse isn't possible). At build time the values are all zero, so a
+    # Manager Summary section here would be misleading. If a future version
+    # captures the typed values via cross-sheet references, restore this block.
     
     # Footnote
     ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
@@ -1941,7 +1723,7 @@ def build_manager_summary(wb_out, date, prop, ws_summary, traffic_data=None, exp
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.50'})
+    return jsonify({'status':'ok','version':'9.51'})
 
 @app.route('/')
 def index():
@@ -2008,16 +1790,10 @@ def format_report():
             except Exception:
                 traceback.print_exc()
                 expiring_rows = None
-        # Opinionn Review Summary PDF (new in v9.50)
+        # Reputation block: rendered with blank inputs for manual entry
+        # (Opinionn PDF is rasterized so no auto-parse possible; user types numbers
+        # directly into the blue cells at E34:K43 each week)
         reputation_data=None
-        op_f=request.files.get('op')
-        if op_f:
-            try:
-                op_bytes = op_f.read()
-                reputation_data = parse_review_summary_pdf(op_bytes)
-            except Exception:
-                traceback.print_exc()
-                reputation_data = None
         build_weekly_summary(wb_out,wb_ro,date,prop,ua_ws,tar_ws,sar_ws,tar_total,sar_total,rr_ws,traffic_data,expiring_rows,tar_red_count,reputation_data)
         # Build Manager Summary tab (reads computed values from Weekly Summary)
         ws_summary_name = next((n for n in wb_out.sheetnames if 'weekly summary' in n.lower()), None)
@@ -2103,7 +1879,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.50</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.51</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
@@ -2112,7 +1888,7 @@ select:focus,input:focus{border-color:var(--g);}
   <div class="card"><div class="sn">STEP 02</div><div class="ct">Upload Working Workbook</div><div class="cd">The master workbook with Weekly Summary and prior AR history.</div>
     <div class="grid"><div class="slot full" id="s-wb"><input type="file" id="f-wb" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#8CB5F9;"></div><span class="sl">&#128210; Weekly Workbook</span></div><div class="ss">Master file — Weekly Summary + history</div><div class="sn2" id="n-wb">Click or drag file here</div></div></div>
   </div>
-  <div class="card"><div class="sn">STEP 03</div><div class="ct">Upload Yardi Exports &amp; Opinionn PDF</div><div class="cd">Upload each Yardi export. Leave empty anything you don\'t have — it will be skipped.</div>
+  <div class="card"><div class="sn">STEP 03</div><div class="ct">Upload Yardi Exports</div><div class="cd">Upload each Yardi export. Leave empty anything you don\'t have — it will be skipped.</div>
     <div class="grid">
       <div class="slot" id="s-ua"><input type="file" id="f-ua" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#7AD694;"></div><span class="sl">Unit Availability</span></div><div class="ss">Onsite &rarr; Analytics &rarr; Unit Availability Details</div><div class="sn2" id="n-ua">Click or drag file here</div></div>
       <div class="slot" id="s-tar"><input type="file" id="f-tar" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#F28E86;"></div><span class="sl">Tenant AR</span></div><div class="ss">Analytics &rarr; Receivable Aging (Excl. HUD)</div><div class="sn2" id="n-tar">Click or drag file here</div></div>
@@ -2120,7 +1896,6 @@ select:focus,input:focus{border-color:var(--g);}
       <div class="slot" id="s-rr"><input type="file" id="f-rr" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#C4A0F5;"></div><span class="sl">Rent Roll</span></div><div class="ss">Onsite &rarr; Analytics &rarr; Rent Roll</div><div class="sn2" id="n-rr">Click or drag file here</div></div>
       <div class="slot" id="s-tr"><input type="file" id="f-tr" accept=".xlsx,.xls,.xlsm,.csv"/><div class="sh"><div class="dot" style="background:#F5C842;"></div><span class="sl">Weekly Traffic</span></div><div class="ss">Ad Spend &amp; Traffic Report (CSV or Excel)</div><div class="sn2" id="n-tr">Click or drag file here</div></div>
       <div class="slot" id="s-ex"><input type="file" id="f-ex" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#FDD868;"></div><span class="sl">Expiring Leases (120 days)</span></div><div class="ss">Analytics &rarr; Expiring Leases</div><div class="sn2" id="n-ex">Click or drag file here</div></div>
-      <div class="slot full" id="s-op"><input type="file" id="f-op" accept=".pdf"/><div class="sh"><div class="dot" style="background:#2DD4BF;"></div><span class="sl">Opinionn Review Summary (PDF)</span></div><div class="ss">Opinionn &rarr; Reports &rarr; Review Summary &rarr; download PDF</div><div class="sn2" id="n-op">Click or drag PDF here</div></div>
     </div>
   </div>
   <div class="card"><div class="sn">STEP 04</div><div class="ct">Format &amp; Download</div><div class="cd">Formats all reports with exact colors, structure, and formulas. Downloads the final workbook.</div>
@@ -2131,7 +1906,7 @@ select:focus,input:focus{border-color:var(--g);}
   </div>
 </div>
 <script>
-["wb","ua","tar","sar","rr","tr","ex","op"].forEach(k=>{
+["wb","ua","tar","sar","rr","tr","ex"].forEach(k=>{
   document.getElementById("f-"+k).addEventListener("change",function(){
     if(this.files[0]){document.getElementById("s-"+k).classList.add("on");document.getElementById("n-"+k).textContent="✓ "+this.files[0].name;}
   });
@@ -2147,7 +1922,7 @@ async function run(){
   if(!document.getElementById("f-wb").files[0]){alert("Please upload the working workbook.");btn.disabled=false;return;}
   const form=new FormData();
   form.append("date",date);form.append("prop",prop);
-  ["wb","ua","tar","sar","rr","tr","ex","op"].forEach(k=>{const f=document.getElementById("f-"+k).files[0];if(f)form.append(k,f);});
+  ["wb","ua","tar","sar","rr","tr","ex"].forEach(k=>{const f=document.getElementById("f-"+k).files[0];if(f)form.append(k,f);});
   L("Uploading and formatting...");P(20);
   try{
     const resp=await fetch("/format",{method:"POST",body:form});
