@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.52 — Opinionn CSV auto-fill for Reputation block"""
+"""Weekly Report Formatter v9.53 — Opinionn PDF auto-fill via Tesseract OCR"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -921,46 +921,43 @@ def parse_traffic(raw_bytes, date):
     return {'date_range': date_range, 'rows': active}
 
 # ============================================================================
-# REPUTATION block - added v9.50, simplified v9.51, CSV auto-fill in v9.52
+# REPUTATION block - added v9.50, simplified v9.51, CSV v9.52, OCR PDF in v9.53
 #
-# Background: The Opinionn Review Summary PDF is a rasterized image, so
-# text-based PDF parsing returns nothing. In v9.52 we switched to the CSV
-# export (Reports -> Review Summary -> download as CSV), which has the
-# per-platform table with columns:
-#   Source, Average Rating, All Time Rating, Positive Ratings, Negative Ratings, Total
-# The CSV does NOT include the headline cards (Overall Public Rating /
-# Total Reviews), so we compute those from the platform rows:
-#   - Total Reviews   = sum of platform totals
-#   - Overall Rating  = weighted average across platforms (rating x total / total)
+# v9.53: The Opinionn Review Summary PDF is a rasterized image (the entire
+# dashboard is rendered as a single image inside the PDF, no extractable text).
+# Opinionn does not export CSV. So we use Tesseract OCR to read the numbers
+# straight off the PDF image. The PDF is converted to a 300dpi PNG via
+# pdf2image, then pytesseract extracts text. Regex pulls the cards section.
+#
+# Required system packages (must be installed on Render via apt):
+#   - tesseract-ocr
+#   - poppler-utils (for pdf2image)
+# Required Python packages: pytesseract, pdf2image, Pillow
 # ============================================================================
-def parse_review_csv(raw_bytes):
-    """Parse the Opinionn 'Review Summary' CSV export.
+def parse_review_pdf(raw_bytes):
+    """OCR the Opinionn Review Summary PDF. Returns reputation_data dict.
     
-    Expected CSV format:
-      Source,Average Rating,All Time Rating,Positive Ratings,Negative Ratings,Total
-      "Google","3.5","","","","53"
-      "Apartments.com","2.7","","","","3"
-      "Yelp","3.0","","","","14"
-      ...
+    The PDF cards layout (read left-to-right):
+      Title row:    Overall Public Rating | Google | Yelp | Apartments.com | ...
+      Ratings row:  3.4★                  | 3.5★   | 3.0★ | 2.7★          | ...
+      Counts row:   70 Reviews            | 53 Reviews | 14 Reviews | 3 Reviews | ...
     
-    Empty/missing values are treated as 0. Computes Overall rating and Total
-    Reviews from the platform rows.
+    Tesseract often misreads the star icon (★) as %, &, etc. — these are
+    stripped during number extraction. Tesseract sometimes drops the decimal
+    point on small ratings ('2.7' -> '27'); we detect and correct this.
     
-    Returns dict in the same shape as build_reputation_block expects:
-      {
-        'overall_rating': float,
-        'overall_total': int,
-        'platforms': {
-          'Google': {'avg_rating': ..., 'all_time_rating': ..., 'positive': ..., 'negative': ..., 'total': ...},
-          ...
-        }
-      }
-    Returns None if parsing fails.
+    Returns None if OCR fails (Tesseract not installed, PDF corrupt, etc).
     """
-    import csv as _csv
-    import io as _io
+    try:
+        from pdf2image import convert_from_bytes
+        import pytesseract
+    except ImportError:
+        # Library not installed; caller falls back to blank cells
+        return None
     
     PLATFORMS = ['Google', 'Apartments.com', 'Yelp', 'Facebook', 'ApartmentRatings.com', 'Opiniion']
+    
+    # Default empty result; we fill in what we can extract
     result = {
         'overall_rating': 0.0,
         'overall_total': 0,
@@ -968,82 +965,79 @@ def parse_review_csv(raw_bytes):
                           'positive': 0, 'negative': 0, 'total': 0} for p in PLATFORMS}
     }
     
-    def _num(v):
-        """Parse a number from a CSV cell. Treats empty/dash/N/A as 0."""
-        if v is None:
-            return 0
-        s = str(v).strip().replace(',', '').replace('$', '').replace('%', '')
-        if not s or s == '-' or s.lower() in ('n/a', 'na', 'none'):
-            return 0
-        try:
-            return float(s)
-        except:
-            return 0
-    
     try:
-        # Decode bytes, handle UTF-8 with BOM
-        text = raw_bytes.decode('utf-8-sig')
-        reader = _csv.DictReader(_io.StringIO(text))
+        # Convert PDF page to image at 300dpi (good balance of accuracy vs speed)
+        images = convert_from_bytes(raw_bytes, dpi=300)
+        if not images:
+            return None
         
-        # Build a case-insensitive column lookup so we tolerate header drift
-        # (e.g. 'Positive Ratings' vs 'Positive Reviews', 'Total' vs 'Total Reviews')
-        for row in reader:
-            # Normalize keys to lowercase for matching
-            norm_row = {(k or '').strip().lower(): v for k, v in row.items()}
-            
-            # Find the source column
-            src = None
-            for key in ('source', 'platform', 'name'):
-                if key in norm_row:
-                    src = (norm_row[key] or '').strip()
-                    break
-            if not src:
+        # OCR the first page (the report is always single-page)
+        text = pytesseract.image_to_string(images[0])
+        
+        # Find the title row containing 'Overall Public Rating'
+        lines = [ln.strip() for ln in text.split('\n') if ln.strip()]
+        title_idx = next((i for i, ln in enumerate(lines)
+                          if re.search(r'overall\s+public\s+rating', ln, re.I)), None)
+        if title_idx is None:
+            return None
+        
+        title_line = lines[title_idx]
+        
+        # Build ordered list of cards from left to right by scanning the title row.
+        # We need positional ordering because cards appear in different orders across
+        # date ranges (e.g. Yelp may come before Apartments.com one week, after the next).
+        matches = [('Overall', title_line.lower().find('overall public rating'))]
+        # Sort platforms longest-first so 'ApartmentRatings.com' matches before 'Apartments.com'
+        plats_sorted = sorted(PLATFORMS, key=len, reverse=True)
+        seen_positions = []
+        for plat in plats_sorted:
+            pos = title_line.lower().find(plat.lower())
+            if pos >= 0:
+                # Skip if this match overlaps with a previously-found longer platform name
+                overlaps = any(pos >= sp and pos < sp + sl for sp, sl in seen_positions)
+                if not overlaps:
+                    matches.append((plat, pos))
+                    seen_positions.append((pos, len(plat)))
+        # Sort by position so order matches the visual card order
+        matches.sort(key=lambda x: x[1])
+        found_order = [name for name, _ in matches]
+        
+        # Get the next two non-empty lines after the title row (ratings, then counts)
+        ratings_line = lines[title_idx + 1] if title_idx + 1 < len(lines) else ''
+        counts_line = lines[title_idx + 2] if title_idx + 2 < len(lines) else ''
+        
+        # Extract ratings. Tesseract sometimes loses the decimal: '2.7' -> '27'.
+        # Heuristic: any 2-digit number with no decimal in range 10-50 was probably 'X.Y'
+        rating_tokens = re.findall(r'\b\d{1,2}(?:\.\d)?\b', ratings_line)
+        ratings = []
+        for tok in rating_tokens:
+            try:
+                v = float(tok)
+            except:
                 continue
-            
-            # Match against canonical platform names (case-insensitive)
-            matched = None
-            for plat in PLATFORMS:
-                if src.lower() == plat.lower():
-                    matched = plat
-                    break
-            if not matched:
-                # Soft match for variations (e.g. 'apartmentratings' vs 'ApartmentRatings.com')
-                for plat in PLATFORMS:
-                    src_clean = src.lower().replace('.', '').replace(' ', '')
-                    plat_clean = plat.lower().replace('.', '').replace(' ', '')
-                    if src_clean == plat_clean or src_clean in plat_clean or plat_clean in src_clean:
-                        matched = plat
-                        break
-            if not matched:
-                continue  # skip rows for unknown platforms
-            
-            # Pull values from each column. Tolerate variant header names.
-            avg = _num(norm_row.get('average rating') or norm_row.get('avg rating'))
-            alltime = _num(norm_row.get('all time rating') or norm_row.get('alltime rating'))
-            pos = _num(norm_row.get('positive ratings') or norm_row.get('positive reviews') or norm_row.get('positive'))
-            neg = _num(norm_row.get('negative ratings') or norm_row.get('negative reviews') or norm_row.get('negative'))
-            total = _num(norm_row.get('total') or norm_row.get('total reviews') or norm_row.get('total ratings'))
-            
-            result['platforms'][matched] = {
-                'avg_rating': avg,
-                'all_time_rating': alltime,
-                'positive': int(pos),
-                'negative': int(neg),
-                'total': int(total),
-            }
+            if v > 5 and '.' not in tok and 10 <= v <= 50:
+                v = v / 10.0  # OCR ate the decimal point
+            if 0 <= v <= 5:
+                ratings.append(v)
         
-        # Compute Overall rating (weighted average) and Total Reviews (sum)
-        total_reviews = 0
-        weighted_sum = 0.0
-        for plat, d in result['platforms'].items():
-            t = d['total']
-            r = d['avg_rating']
-            if t > 0:
-                total_reviews += t
-                weighted_sum += r * t
+        # Extract review counts: '70 Reviews', '53 Reviews', etc.
+        count_tokens = re.findall(r'(\d+)\s*reviews?', counts_line, re.I)
+        counts = [int(t) for t in count_tokens]
         
-        result['overall_total'] = total_reviews
-        result['overall_rating'] = round(weighted_sum / total_reviews, 1) if total_reviews > 0 else 0.0
+        # Map ratings/counts to cards by position
+        for i, name in enumerate(found_order):
+            rating = ratings[i] if i < len(ratings) else None
+            count = counts[i] if i < len(counts) else None
+            if name == 'Overall':
+                if rating is not None: result['overall_rating'] = rating
+                if count is not None:  result['overall_total'] = count
+            else:
+                if rating is not None:
+                    result['platforms'][name]['avg_rating'] = rating
+                    # PDF cards don't separate avg vs all-time, so use the same value
+                    result['platforms'][name]['all_time_rating'] = rating
+                if count is not None:
+                    result['platforms'][name]['total'] = count
         
         return result
     except Exception:
@@ -1857,7 +1851,7 @@ def build_manager_summary(wb_out, date, prop, ws_summary, traffic_data=None, exp
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.52'})
+    return jsonify({'status':'ok','version':'9.53'})
 
 @app.route('/')
 def index():
@@ -1924,14 +1918,15 @@ def format_report():
             except Exception:
                 traceback.print_exc()
                 expiring_rows = None
-        # Opinionn Review Summary CSV (new in v9.52). The CSV gives us per-platform
-        # ratings; Overall rating + Total Reviews are computed from the platform rows.
-        # If no CSV uploaded or parsing fails, block renders with zeros.
+        # Opinionn Review Summary PDF (new in v9.53). OCR via Tesseract reads
+        # the rasterized PDF and pulls out the cards row (Overall + per-platform
+        # ratings and review counts). If Tesseract isn't installed or OCR fails,
+        # block falls back to zeros for manual entry.
         reputation_data=None
         op_f=request.files.get('op')
         if op_f:
             try:
-                reputation_data = parse_review_csv(op_f.read())
+                reputation_data = parse_review_pdf(op_f.read())
             except Exception:
                 traceback.print_exc()
                 reputation_data = None
@@ -2020,7 +2015,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.52</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.53</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
@@ -2029,7 +2024,7 @@ select:focus,input:focus{border-color:var(--g);}
   <div class="card"><div class="sn">STEP 02</div><div class="ct">Upload Working Workbook</div><div class="cd">The master workbook with Weekly Summary and prior AR history.</div>
     <div class="grid"><div class="slot full" id="s-wb"><input type="file" id="f-wb" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#8CB5F9;"></div><span class="sl">&#128210; Weekly Workbook</span></div><div class="ss">Master file — Weekly Summary + history</div><div class="sn2" id="n-wb">Click or drag file here</div></div></div>
   </div>
-  <div class="card"><div class="sn">STEP 03</div><div class="ct">Upload Yardi Exports &amp; Opinionn CSV</div><div class="cd">Upload each Yardi export. Leave empty anything you don\'t have — it will be skipped.</div>
+  <div class="card"><div class="sn">STEP 03</div><div class="ct">Upload Yardi Exports &amp; Opinionn PDF</div><div class="cd">Upload each Yardi export. Leave empty anything you don\'t have — it will be skipped.</div>
     <div class="grid">
       <div class="slot" id="s-ua"><input type="file" id="f-ua" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#7AD694;"></div><span class="sl">Unit Availability</span></div><div class="ss">Onsite &rarr; Analytics &rarr; Unit Availability Details</div><div class="sn2" id="n-ua">Click or drag file here</div></div>
       <div class="slot" id="s-tar"><input type="file" id="f-tar" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#F28E86;"></div><span class="sl">Tenant AR</span></div><div class="ss">Analytics &rarr; Receivable Aging (Excl. HUD)</div><div class="sn2" id="n-tar">Click or drag file here</div></div>
@@ -2037,7 +2032,7 @@ select:focus,input:focus{border-color:var(--g);}
       <div class="slot" id="s-rr"><input type="file" id="f-rr" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#C4A0F5;"></div><span class="sl">Rent Roll</span></div><div class="ss">Onsite &rarr; Analytics &rarr; Rent Roll</div><div class="sn2" id="n-rr">Click or drag file here</div></div>
       <div class="slot" id="s-tr"><input type="file" id="f-tr" accept=".xlsx,.xls,.xlsm,.csv"/><div class="sh"><div class="dot" style="background:#F5C842;"></div><span class="sl">Weekly Traffic</span></div><div class="ss">Ad Spend &amp; Traffic Report (CSV or Excel)</div><div class="sn2" id="n-tr">Click or drag file here</div></div>
       <div class="slot" id="s-ex"><input type="file" id="f-ex" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#FDD868;"></div><span class="sl">Expiring Leases (120 days)</span></div><div class="ss">Analytics &rarr; Expiring Leases</div><div class="sn2" id="n-ex">Click or drag file here</div></div>
-      <div class="slot full" id="s-op"><input type="file" id="f-op" accept=".csv"/><div class="sh"><div class="dot" style="background:#2DD4BF;"></div><span class="sl">Opinionn Review Summary (CSV)</span></div><div class="ss">Opinionn &rarr; Reports &rarr; Review Summary &rarr; download CSV (not PDF)</div><div class="sn2" id="n-op">Click or drag CSV here</div></div>
+      <div class="slot full" id="s-op"><input type="file" id="f-op" accept=".pdf"/><div class="sh"><div class="dot" style="background:#2DD4BF;"></div><span class="sl">Opinionn Review Summary (PDF)</span></div><div class="ss">Opinionn &rarr; Reports &rarr; Review Summary &rarr; download PDF</div><div class="sn2" id="n-op">Click or drag PDF here</div></div>
     </div>
   </div>
   <div class="card"><div class="sn">STEP 04</div><div class="ct">Format &amp; Download</div><div class="cd">Formats all reports with exact colors, structure, and formulas. Downloads the final workbook.</div>
