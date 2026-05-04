@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.51 — Reputation block at E34:K43 (blank inputs for manual entry)"""
+"""Weekly Report Formatter v9.52 — Opinionn CSV auto-fill for Reputation block"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -921,15 +921,136 @@ def parse_traffic(raw_bytes, date):
     return {'date_range': date_range, 'rows': active}
 
 # ============================================================================
-# REPUTATION block - new in v9.50, simplified in v9.51
+# REPUTATION block - added v9.50, simplified v9.51, CSV auto-fill in v9.52
 #
-# Background: The Opinionn Review Summary PDF is a rasterized image (0 chars,
-# 1 image), so text-based PDF parsing returns nothing. Rather than ship OCR
-# (heavy dependency, fragile on Render free tier), we render the block with
-# blank blue input cells. Roman types the numbers from the PDF directly into
-# the spreadsheet each week (~30 seconds), then attaches the PDF to the
-# JEMCOR email separately.
+# Background: The Opinionn Review Summary PDF is a rasterized image, so
+# text-based PDF parsing returns nothing. In v9.52 we switched to the CSV
+# export (Reports -> Review Summary -> download as CSV), which has the
+# per-platform table with columns:
+#   Source, Average Rating, All Time Rating, Positive Ratings, Negative Ratings, Total
+# The CSV does NOT include the headline cards (Overall Public Rating /
+# Total Reviews), so we compute those from the platform rows:
+#   - Total Reviews   = sum of platform totals
+#   - Overall Rating  = weighted average across platforms (rating x total / total)
 # ============================================================================
+def parse_review_csv(raw_bytes):
+    """Parse the Opinionn 'Review Summary' CSV export.
+    
+    Expected CSV format:
+      Source,Average Rating,All Time Rating,Positive Ratings,Negative Ratings,Total
+      "Google","3.5","","","","53"
+      "Apartments.com","2.7","","","","3"
+      "Yelp","3.0","","","","14"
+      ...
+    
+    Empty/missing values are treated as 0. Computes Overall rating and Total
+    Reviews from the platform rows.
+    
+    Returns dict in the same shape as build_reputation_block expects:
+      {
+        'overall_rating': float,
+        'overall_total': int,
+        'platforms': {
+          'Google': {'avg_rating': ..., 'all_time_rating': ..., 'positive': ..., 'negative': ..., 'total': ...},
+          ...
+        }
+      }
+    Returns None if parsing fails.
+    """
+    import csv as _csv
+    import io as _io
+    
+    PLATFORMS = ['Google', 'Apartments.com', 'Yelp', 'Facebook', 'ApartmentRatings.com', 'Opiniion']
+    result = {
+        'overall_rating': 0.0,
+        'overall_total': 0,
+        'platforms': {p: {'avg_rating': 0.0, 'all_time_rating': 0.0,
+                          'positive': 0, 'negative': 0, 'total': 0} for p in PLATFORMS}
+    }
+    
+    def _num(v):
+        """Parse a number from a CSV cell. Treats empty/dash/N/A as 0."""
+        if v is None:
+            return 0
+        s = str(v).strip().replace(',', '').replace('$', '').replace('%', '')
+        if not s or s == '-' or s.lower() in ('n/a', 'na', 'none'):
+            return 0
+        try:
+            return float(s)
+        except:
+            return 0
+    
+    try:
+        # Decode bytes, handle UTF-8 with BOM
+        text = raw_bytes.decode('utf-8-sig')
+        reader = _csv.DictReader(_io.StringIO(text))
+        
+        # Build a case-insensitive column lookup so we tolerate header drift
+        # (e.g. 'Positive Ratings' vs 'Positive Reviews', 'Total' vs 'Total Reviews')
+        for row in reader:
+            # Normalize keys to lowercase for matching
+            norm_row = {(k or '').strip().lower(): v for k, v in row.items()}
+            
+            # Find the source column
+            src = None
+            for key in ('source', 'platform', 'name'):
+                if key in norm_row:
+                    src = (norm_row[key] or '').strip()
+                    break
+            if not src:
+                continue
+            
+            # Match against canonical platform names (case-insensitive)
+            matched = None
+            for plat in PLATFORMS:
+                if src.lower() == plat.lower():
+                    matched = plat
+                    break
+            if not matched:
+                # Soft match for variations (e.g. 'apartmentratings' vs 'ApartmentRatings.com')
+                for plat in PLATFORMS:
+                    src_clean = src.lower().replace('.', '').replace(' ', '')
+                    plat_clean = plat.lower().replace('.', '').replace(' ', '')
+                    if src_clean == plat_clean or src_clean in plat_clean or plat_clean in src_clean:
+                        matched = plat
+                        break
+            if not matched:
+                continue  # skip rows for unknown platforms
+            
+            # Pull values from each column. Tolerate variant header names.
+            avg = _num(norm_row.get('average rating') or norm_row.get('avg rating'))
+            alltime = _num(norm_row.get('all time rating') or norm_row.get('alltime rating'))
+            pos = _num(norm_row.get('positive ratings') or norm_row.get('positive reviews') or norm_row.get('positive'))
+            neg = _num(norm_row.get('negative ratings') or norm_row.get('negative reviews') or norm_row.get('negative'))
+            total = _num(norm_row.get('total') or norm_row.get('total reviews') or norm_row.get('total ratings'))
+            
+            result['platforms'][matched] = {
+                'avg_rating': avg,
+                'all_time_rating': alltime,
+                'positive': int(pos),
+                'negative': int(neg),
+                'total': int(total),
+            }
+        
+        # Compute Overall rating (weighted average) and Total Reviews (sum)
+        total_reviews = 0
+        weighted_sum = 0.0
+        for plat, d in result['platforms'].items():
+            t = d['total']
+            r = d['avg_rating']
+            if t > 0:
+                total_reviews += t
+                weighted_sum += r * t
+        
+        result['overall_total'] = total_reviews
+        result['overall_rating'] = round(weighted_sum / total_reviews, 1) if total_reviews > 0 else 0.0
+        
+        return result
+    except Exception:
+        traceback.print_exc()
+        return None
+
+
 def build_reputation_block(ws, reputation_data, start_row=34, start_col=5):
     """Build the Reputation block at E34:K43 (default) on the Weekly Summary tab.
     
@@ -1701,12 +1822,25 @@ def build_manager_summary(wb_out, date, prop, ws_summary, traffic_data=None, exp
         ask_questions(r); r += 1
         r += 1
     
-    # === REPUTATION SECTION ===
-    # NOTE: Removed in v9.51. The Reputation block on Weekly Summary is filled
-    # in manually by the user AFTER the formatter runs (PDF is rasterized so
-    # auto-parse isn't possible). At build time the values are all zero, so a
-    # Manager Summary section here would be misleading. If a future version
-    # captures the typed values via cross-sheet references, restore this block.
+    # === REPUTATION SECTION (Opinionn) — restored in v9.52 ===
+    # Pulls from parsed CSV data. Skipped only if no CSV was uploaded.
+    if reputation_data:
+        section_header(r, 'AS FOR REPUTATION (OPINIONN)'); r += 1
+        overall_rating = reputation_data.get('overall_rating') or 0
+        overall_total = reputation_data.get('overall_total') or 0
+        bullet(r, f"Overall Public Rating: {overall_rating:.1f} stars across {fmt_num(overall_total)} total reviews"); r += 1
+        bullet(r, f"Industry Average: 3.9 stars"); r += 1
+        # Active platforms (where total > 0)
+        active_plats = [(p, d) for p, d in reputation_data.get('platforms', {}).items()
+                        if d.get('total', 0) > 0]
+        if active_plats:
+            r += 1
+            for plat, d in active_plats:
+                avg = d.get('avg_rating') or 0
+                tot = d.get('total') or 0
+                bullet(r, f"{plat}: {avg:.1f} stars, {fmt_num(tot)} reviews"); r += 1
+        ask_questions(r); r += 1
+        r += 1
     
     # Footnote
     ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
@@ -1723,7 +1857,7 @@ def build_manager_summary(wb_out, date, prop, ws_summary, traffic_data=None, exp
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.51'})
+    return jsonify({'status':'ok','version':'9.52'})
 
 @app.route('/')
 def index():
@@ -1790,10 +1924,17 @@ def format_report():
             except Exception:
                 traceback.print_exc()
                 expiring_rows = None
-        # Reputation block: rendered with blank inputs for manual entry
-        # (Opinionn PDF is rasterized so no auto-parse possible; user types numbers
-        # directly into the blue cells at E34:K43 each week)
+        # Opinionn Review Summary CSV (new in v9.52). The CSV gives us per-platform
+        # ratings; Overall rating + Total Reviews are computed from the platform rows.
+        # If no CSV uploaded or parsing fails, block renders with zeros.
         reputation_data=None
+        op_f=request.files.get('op')
+        if op_f:
+            try:
+                reputation_data = parse_review_csv(op_f.read())
+            except Exception:
+                traceback.print_exc()
+                reputation_data = None
         build_weekly_summary(wb_out,wb_ro,date,prop,ua_ws,tar_ws,sar_ws,tar_total,sar_total,rr_ws,traffic_data,expiring_rows,tar_red_count,reputation_data)
         # Build Manager Summary tab (reads computed values from Weekly Summary)
         ws_summary_name = next((n for n in wb_out.sheetnames if 'weekly summary' in n.lower()), None)
@@ -1879,7 +2020,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.51</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.52</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
@@ -1888,7 +2029,7 @@ select:focus,input:focus{border-color:var(--g);}
   <div class="card"><div class="sn">STEP 02</div><div class="ct">Upload Working Workbook</div><div class="cd">The master workbook with Weekly Summary and prior AR history.</div>
     <div class="grid"><div class="slot full" id="s-wb"><input type="file" id="f-wb" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#8CB5F9;"></div><span class="sl">&#128210; Weekly Workbook</span></div><div class="ss">Master file — Weekly Summary + history</div><div class="sn2" id="n-wb">Click or drag file here</div></div></div>
   </div>
-  <div class="card"><div class="sn">STEP 03</div><div class="ct">Upload Yardi Exports</div><div class="cd">Upload each Yardi export. Leave empty anything you don\'t have — it will be skipped.</div>
+  <div class="card"><div class="sn">STEP 03</div><div class="ct">Upload Yardi Exports &amp; Opinionn CSV</div><div class="cd">Upload each Yardi export. Leave empty anything you don\'t have — it will be skipped.</div>
     <div class="grid">
       <div class="slot" id="s-ua"><input type="file" id="f-ua" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#7AD694;"></div><span class="sl">Unit Availability</span></div><div class="ss">Onsite &rarr; Analytics &rarr; Unit Availability Details</div><div class="sn2" id="n-ua">Click or drag file here</div></div>
       <div class="slot" id="s-tar"><input type="file" id="f-tar" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#F28E86;"></div><span class="sl">Tenant AR</span></div><div class="ss">Analytics &rarr; Receivable Aging (Excl. HUD)</div><div class="sn2" id="n-tar">Click or drag file here</div></div>
@@ -1896,6 +2037,7 @@ select:focus,input:focus{border-color:var(--g);}
       <div class="slot" id="s-rr"><input type="file" id="f-rr" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#C4A0F5;"></div><span class="sl">Rent Roll</span></div><div class="ss">Onsite &rarr; Analytics &rarr; Rent Roll</div><div class="sn2" id="n-rr">Click or drag file here</div></div>
       <div class="slot" id="s-tr"><input type="file" id="f-tr" accept=".xlsx,.xls,.xlsm,.csv"/><div class="sh"><div class="dot" style="background:#F5C842;"></div><span class="sl">Weekly Traffic</span></div><div class="ss">Ad Spend &amp; Traffic Report (CSV or Excel)</div><div class="sn2" id="n-tr">Click or drag file here</div></div>
       <div class="slot" id="s-ex"><input type="file" id="f-ex" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#FDD868;"></div><span class="sl">Expiring Leases (120 days)</span></div><div class="ss">Analytics &rarr; Expiring Leases</div><div class="sn2" id="n-ex">Click or drag file here</div></div>
+      <div class="slot full" id="s-op"><input type="file" id="f-op" accept=".csv"/><div class="sh"><div class="dot" style="background:#2DD4BF;"></div><span class="sl">Opinionn Review Summary (CSV)</span></div><div class="ss">Opinionn &rarr; Reports &rarr; Review Summary &rarr; download CSV (not PDF)</div><div class="sn2" id="n-op">Click or drag CSV here</div></div>
     </div>
   </div>
   <div class="card"><div class="sn">STEP 04</div><div class="ct">Format &amp; Download</div><div class="cd">Formats all reports with exact colors, structure, and formulas. Downloads the final workbook.</div>
@@ -1906,7 +2048,7 @@ select:focus,input:focus{border-color:var(--g);}
   </div>
 </div>
 <script>
-["wb","ua","tar","sar","rr","tr","ex"].forEach(k=>{
+["wb","ua","tar","sar","rr","tr","ex","op"].forEach(k=>{
   document.getElementById("f-"+k).addEventListener("change",function(){
     if(this.files[0]){document.getElementById("s-"+k).classList.add("on");document.getElementById("n-"+k).textContent="✓ "+this.files[0].name;}
   });
@@ -1922,7 +2064,7 @@ async function run(){
   if(!document.getElementById("f-wb").files[0]){alert("Please upload the working workbook.");btn.disabled=false;return;}
   const form=new FormData();
   form.append("date",date);form.append("prop",prop);
-  ["wb","ua","tar","sar","rr","tr","ex"].forEach(k=>{const f=document.getElementById("f-"+k).files[0];if(f)form.append(k,f);});
+  ["wb","ua","tar","sar","rr","tr","ex","op"].forEach(k=>{const f=document.getElementById("f-"+k).files[0];if(f)form.append(k,f);});
   L("Uploading and formatting...");P(20);
   try{
     const resp=await fetch("/format",{method:"POST",body:form});
