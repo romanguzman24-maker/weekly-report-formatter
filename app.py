@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.54 — Docker deploy on Render free tier (enables Tesseract OCR)"""
+"""Weekly Report Formatter v9.55 — Docker deploy on Render free tier (enables Tesseract OCR)"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -1187,7 +1187,131 @@ def build_reputation_block(ws, reputation_data, start_row=34, start_col=5):
 # ============================================================================
 
 
-def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar_ws=None, tar_total=0, sar_total=0, rr_ws=None, traffic_data=None, expiring_rows=None, tar_red_count=0, reputation_data=None):
+
+KNOCK_METRICS = [
+    ('Prospect Engagement Score', 'pct'),
+    ('Leads This Week',           'int'),
+    ('Visits This Week',          'int'),
+    ('Leases This Week',          'int'),
+    ('Resident Engagement Score', 'pct'),
+]
+
+
+def build_knock_tab(wb_out, date, prop):
+    """Create the 'Knock CRM <date>' tab. Blue input cells for manual entry.
+
+    Managers snip the Stats card from Knock CRM and type the five values in.
+    Screenshot pastes below row 14 as the source of record.
+    """
+    BLUE = 'FFBDD7EE'
+    AB = bblack()
+    title = f'Knock CRM {date}'
+    if title in wb_out.sheetnames:
+        del wb_out[title]
+    ws = wb_out.create_sheet(title)
+
+    hdr_lines = [prop.split('(')[0].strip(), 'Knock CRM Weekly Stats', date]
+    for i, txt in enumerate(hdr_lines):
+        r = i + 1
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=3)
+        for c in range(1, 4):
+            cell = ws.cell(r, c)
+            cell.fill = gfill(BLUE)
+            cell.font = gfont(bold=True, sz=9)
+            cell.alignment = galign('center')
+            cell.border = AB
+        ws.cell(r, 1).value = txt
+
+    for i, h in enumerate(['Metric', 'This Week', 'Prior Week'], start=1):
+        cell = ws.cell(5, i, h)
+        cell.fill = gfill(BLUE)
+        cell.font = gfont(bold=True, sz=9)
+        cell.alignment = galign('center')
+        cell.border = AB
+
+    for i, (label, kind) in enumerate(KNOCK_METRICS):
+        r = 6 + i
+        fmt = '0.0%' if kind == 'pct' else '0'
+        c1 = ws.cell(r, 1, label)
+        c1.font = gfont(sz=9)
+        c1.alignment = galign('left')
+        c1.border = AB
+        for col in (2, 3):
+            cell = ws.cell(r, col)
+            cell.fill = gfill(BLUE)
+            cell.font = gfont(sz=9)
+            cell.alignment = galign('center')
+            cell.number_format = fmt
+            cell.border = AB
+
+    note = ws.cell(13, 1, 'Enter percentages as whole numbers with the % format applied (21.2% not 21.2)')
+    note.font = gfont(sz=8)
+    note2 = ws.cell(14, 1, 'Paste the Knock Stats screenshot below. Snip must be taken the same day as the Yardi pull.')
+    note2.font = gfont(sz=8)
+
+    ws.column_dimensions['A'].width = 30
+    ws.column_dimensions['B'].width = 13
+    ws.column_dimensions['C'].width = 13
+    ws.freeze_panes = 'A6'
+    return ws, title
+
+
+def build_knock_block(ws, knock_tab_name, start_row=45, start_col=5):
+    """Build the Knock CRM block on Weekly Summary at E45:H51 (default).
+
+    Values are formula references to the Knock CRM tab, never hardcoded.
+    """
+    BLUE = 'FFBDD7EE'
+    AB = bblack()
+    end_col = start_col + 3
+
+    ws.merge_cells(start_row=start_row, start_column=start_col,
+                   end_row=start_row, end_column=end_col)
+    for c in range(start_col, end_col + 1):
+        cell = ws.cell(start_row, c)
+        cell.fill = gfill(BLUE)
+        cell.font = gfont(bold=True, sz=9)
+        cell.alignment = galign('center')
+        cell.border = AB
+    ws.cell(start_row, start_col).value = 'Knock CRM'
+
+    hdr_r = start_row + 1
+    for i, h in enumerate(['Metric', '', 'This Week', 'Prior Week']):
+        cell = ws.cell(hdr_r, start_col + i)
+        cell.value = h if h else None
+        cell.fill = gfill(BLUE)
+        cell.font = gfont(bold=True, sz=9)
+        cell.alignment = galign('center')
+        cell.border = AB
+    ws.merge_cells(start_row=hdr_r, start_column=start_col,
+                   end_row=hdr_r, end_column=start_col + 1)
+    ws.cell(hdr_r, start_col).value = 'Metric'
+
+    for i, (label, kind) in enumerate(KNOCK_METRICS):
+        r = hdr_r + 1 + i
+        src = 6 + i
+        fmt = '0.0%' if kind == 'pct' else '0'
+
+        ws.merge_cells(start_row=r, start_column=start_col,
+                       end_row=r, end_column=start_col + 1)
+        for c in (start_col, start_col + 1):
+            cell = ws.cell(r, c)
+            cell.font = gfont(sz=9)
+            cell.alignment = galign('left')
+            cell.border = AB
+        ws.cell(r, start_col).value = label
+
+        for off, srccol in ((2, 'B'), (3, 'C')):
+            cell = ws.cell(r, start_col + off)
+            cell.value = (f"=IFERROR('{knock_tab_name}'!{srccol}{src},\"\")"
+                          if knock_tab_name else None)
+            cell.font = gfont(sz=9)
+            cell.alignment = galign('center')
+            cell.number_format = fmt
+            cell.border = AB
+
+
+def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar_ws=None, tar_total=0, sar_total=0, rr_ws=None, traffic_data=None, expiring_rows=None, tar_red_count=0, reputation_data=None, knock_tab_name=None):
     """
     Build Weekly Summary per spec:
       - 10 cols wide (A-J), ~56 rows
@@ -1523,6 +1647,13 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
     # for manual entry (the Opinionn PDF is rasterized so auto-parse isn't
     # possible; Roman types the numbers from the PDF into the cells each week).
     build_reputation_block(ws, reputation_data, start_row=34, start_col=5)
+    
+    # =========================================================================
+    # SECTION 9: Knock CRM block (rows 45-51, cols E-H) - added in v9.55
+    # =========================================================================
+    # Sits directly below Reputation. Values pull by formula from the
+    # 'Knock CRM <date>' tab, where the manager types the five Stats values.
+    build_knock_block(ws, knock_tab_name, start_row=45, start_col=5)
     
     # =========================================================================
     # =========================================================================
@@ -1930,7 +2061,15 @@ def format_report():
             except Exception:
                 traceback.print_exc()
                 reputation_data = None
-        build_weekly_summary(wb_out,wb_ro,date,prop,ua_ws,tar_ws,sar_ws,tar_total,sar_total,rr_ws,traffic_data,expiring_rows,tar_red_count,reputation_data)
+        # Knock CRM tab (v9.55). Built before Weekly Summary so the block can
+        # reference it by name. Values are typed in by the site manager.
+        knock_tab_name=None
+        try:
+            _,knock_tab_name=build_knock_tab(wb_out,date,prop)
+        except Exception:
+            traceback.print_exc()
+            knock_tab_name=None
+        build_weekly_summary(wb_out,wb_ro,date,prop,ua_ws,tar_ws,sar_ws,tar_total,sar_total,rr_ws,traffic_data,expiring_rows,tar_red_count,reputation_data,knock_tab_name)
         # Build Manager Summary tab (reads computed values from Weekly Summary)
         ws_summary_name = next((n for n in wb_out.sheetnames if 'weekly summary' in n.lower()), None)
         if ws_summary_name:
@@ -1942,7 +2081,8 @@ def format_report():
         ws_tab=find_tab(current,'weekly summary'); ua_tab=find_tab(current,'unit availability')
         rr_tab=find_tab(current,'rent roll'); tar_tab=find_tab(current,'tenant ar'); sar_tab=find_tab(current,'sub ar')
         ex_tab=find_tab(current,'expiring leases'); mgr_tab=find_tab(current,'manager summary')
-        desired=[t for t in [ws_tab,ua_tab,rr_tab,tar_tab,sar_tab,ex_tab,mgr_tab] if t]
+        knock_tab=find_tab(current,'knock crm')
+        desired=[t for t in [ws_tab,ua_tab,rr_tab,tar_tab,sar_tab,ex_tab,knock_tab,mgr_tab] if t]
         remaining=[t for t in current if t not in desired]
         ordered=desired+remaining
         for target_i,name in enumerate(ordered):
