@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.55 — Docker deploy on Render free tier (enables Tesseract OCR)"""
+"""Weekly Report Formatter v9.56 — Docker deploy on Render free tier (enables Tesseract OCR)"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -1188,16 +1188,66 @@ def build_reputation_block(ws, reputation_data, start_row=34, start_col=5):
 
 
 
+
+def parse_knock_image(raw_bytes):
+    """OCR a snipped Knock CRM Stats card. Returns dict of the five metrics, or None.
+
+    The card renders as clean browser text, so Tesseract reads it reliably.
+    Long labels wrap across lines, so percentages are matched positionally
+    (first % is prospect engagement, last % is resident engagement) while the
+    three counts are matched by their own label text.
+
+    Percentages are returned as fractions (21.2% -> 0.212) to suit Excel's
+    percent number format. Returns None if OCR is unavailable or nothing parses.
+    """
+    try:
+        import pytesseract
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        img = Image.open(io.BytesIO(raw_bytes))
+        text = pytesseract.image_to_string(img)
+    except Exception:
+        traceback.print_exc()
+        return None
+
+    out = {'prospect': None, 'leads': None, 'visits': None,
+           'leases': None, 'resident': None}
+
+    pcts = []
+    for tok in re.findall(r'(\d{1,3}(?:\.\d+)?)\s*%', text):
+        try:
+            v = float(tok)
+        except ValueError:
+            continue
+        if 0 <= v <= 100:
+            pcts.append(v / 100.0)
+    if pcts:
+        out['prospect'] = pcts[0]
+        if len(pcts) > 1:
+            out['resident'] = pcts[-1]
+
+    for key, word in (('leads', 'leads'), ('visits', 'visits'), ('leases', 'leases')):
+        m = re.search(word + r'\s+this\s+week\s*[:.]?\s*(\d+)', text, re.I)
+        if m:
+            try:
+                out[key] = int(m.group(1))
+            except ValueError:
+                pass
+
+    return out if any(v is not None for v in out.values()) else None
+
 KNOCK_METRICS = [
-    ('Prospect Engagement Score', 'pct'),
-    ('Leads This Week',           'int'),
-    ('Visits This Week',          'int'),
-    ('Leases This Week',          'int'),
-    ('Resident Engagement Score', 'pct'),
+    ('Prospect Engagement Score', 'pct', 'prospect'),
+    ('Leads This Week',           'int', 'leads'),
+    ('Visits This Week',          'int', 'visits'),
+    ('Leases This Week',          'int', 'leases'),
+    ('Resident Engagement Score', 'pct', 'resident'),
 ]
 
 
-def build_knock_tab(wb_out, date, prop):
+def build_knock_tab(wb_out, date, prop, knock_data=None):
     """Create the 'Knock CRM <date>' tab. Blue input cells for manual entry.
 
     Managers snip the Stats card from Knock CRM and type the five values in.
@@ -1229,7 +1279,7 @@ def build_knock_tab(wb_out, date, prop):
         cell.alignment = galign('center')
         cell.border = AB
 
-    for i, (label, kind) in enumerate(KNOCK_METRICS):
+    for i, (label, kind, key) in enumerate(KNOCK_METRICS):
         r = 6 + i
         fmt = '0.0%' if kind == 'pct' else '0'
         c1 = ws.cell(r, 1, label)
@@ -1238,15 +1288,20 @@ def build_knock_tab(wb_out, date, prop):
         c1.border = AB
         for col in (2, 3):
             cell = ws.cell(r, col)
+            if col == 2 and knock_data:
+                cell.value = knock_data.get(key)
             cell.fill = gfill(BLUE)
             cell.font = gfont(sz=9)
             cell.alignment = galign('center')
             cell.number_format = fmt
             cell.border = AB
 
-    note = ws.cell(13, 1, 'Enter percentages as whole numbers with the % format applied (21.2% not 21.2)')
+    n1 = 'Values read from the uploaded Knock Stats snip. Verify against the card before submitting.'
+    if not knock_data:
+        n1 = 'No Knock snip uploaded. Enter values manually, percentages as 21.2% not 21.2.'
+    note = ws.cell(13, 1, n1)
     note.font = gfont(sz=8)
-    note2 = ws.cell(14, 1, 'Paste the Knock Stats screenshot below. Snip must be taken the same day as the Yardi pull.')
+    note2 = ws.cell(14, 1, 'Snip must be taken the same day as the Yardi pull, Knock resets its weekly counters.')
     note2.font = gfont(sz=8)
 
     ws.column_dimensions['A'].width = 30
@@ -1287,7 +1342,7 @@ def build_knock_block(ws, knock_tab_name, start_row=45, start_col=5):
                    end_row=hdr_r, end_column=start_col + 1)
     ws.cell(hdr_r, start_col).value = 'Metric'
 
-    for i, (label, kind) in enumerate(KNOCK_METRICS):
+    for i, (label, kind, _key) in enumerate(KNOCK_METRICS):
         r = hdr_r + 1 + i
         src = 6 + i
         fmt = '0.0%' if kind == 'pct' else '0'
@@ -1982,7 +2037,7 @@ def build_manager_summary(wb_out, date, prop, ws_summary, traffic_data=None, exp
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.55'})
+    return jsonify({'status':'ok','version':'9.56'})
 
 @app.route('/')
 def index():
@@ -2063,9 +2118,17 @@ def format_report():
                 reputation_data = None
         # Knock CRM tab (v9.55). Built before Weekly Summary so the block can
         # reference it by name. Values are typed in by the site manager.
+        knock_data=None
+        kn_f=request.files.get('kn')
+        if kn_f:
+            try:
+                knock_data=parse_knock_image(kn_f.read())
+            except Exception:
+                traceback.print_exc()
+                knock_data=None
         knock_tab_name=None
         try:
-            _,knock_tab_name=build_knock_tab(wb_out,date,prop)
+            _,knock_tab_name=build_knock_tab(wb_out,date,prop,knock_data)
         except Exception:
             traceback.print_exc()
             knock_tab_name=None
@@ -2155,7 +2218,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.55</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.56</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
@@ -2164,7 +2227,7 @@ select:focus,input:focus{border-color:var(--g);}
   <div class="card"><div class="sn">STEP 02</div><div class="ct">Upload Working Workbook</div><div class="cd">The master workbook with Weekly Summary and prior AR history.</div>
     <div class="grid"><div class="slot full" id="s-wb"><input type="file" id="f-wb" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#8CB5F9;"></div><span class="sl">&#128210; Weekly Workbook</span></div><div class="ss">Master file — Weekly Summary + history</div><div class="sn2" id="n-wb">Click or drag file here</div></div></div>
   </div>
-  <div class="card"><div class="sn">STEP 03</div><div class="ct">Upload Yardi Exports &amp; Opinionn PDF</div><div class="cd">Upload each Yardi export. Leave empty anything you don\'t have — it will be skipped.</div>
+  <div class="card"><div class="sn">STEP 03</div><div class="ct">Upload Yardi Exports, Knock Snip &amp; Opinionn PDF</div><div class="cd">Upload each Yardi export. Leave empty anything you don\'t have — it will be skipped.</div>
     <div class="grid">
       <div class="slot" id="s-ua"><input type="file" id="f-ua" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#7AD694;"></div><span class="sl">Unit Availability</span></div><div class="ss">Onsite &rarr; Analytics &rarr; Unit Availability Details</div><div class="sn2" id="n-ua">Click or drag file here</div></div>
       <div class="slot" id="s-tar"><input type="file" id="f-tar" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#F28E86;"></div><span class="sl">Tenant AR</span></div><div class="ss">Analytics &rarr; Receivable Aging (Excl. HUD)</div><div class="sn2" id="n-tar">Click or drag file here</div></div>
@@ -2172,6 +2235,7 @@ select:focus,input:focus{border-color:var(--g);}
       <div class="slot" id="s-rr"><input type="file" id="f-rr" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#C4A0F5;"></div><span class="sl">Rent Roll</span></div><div class="ss">Onsite &rarr; Analytics &rarr; Rent Roll</div><div class="sn2" id="n-rr">Click or drag file here</div></div>
       <div class="slot" id="s-tr"><input type="file" id="f-tr" accept=".xlsx,.xls,.xlsm,.csv"/><div class="sh"><div class="dot" style="background:#F5C842;"></div><span class="sl">Weekly Traffic</span></div><div class="ss">Ad Spend &amp; Traffic Report (CSV or Excel)</div><div class="sn2" id="n-tr">Click or drag file here</div></div>
       <div class="slot" id="s-ex"><input type="file" id="f-ex" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#FDD868;"></div><span class="sl">Expiring Leases (120 days)</span></div><div class="ss">Analytics &rarr; Expiring Leases</div><div class="sn2" id="n-ex">Click or drag file here</div></div>
+      <div class="slot full" id="s-kn"><input type="file" id="f-kn" accept="image/png,image/jpeg"/><div class="sh"><div class="dot" style="background:#F5A0C8;"></div><span class="sl">Knock CRM Stats (snip)</span></div><div class="ss">Knock CRM &rarr; dashboard &rarr; snip the Stats card</div><div class="sn2" id="n-kn">Click or drag image here</div></div>
       <div class="slot full" id="s-op"><input type="file" id="f-op" accept=".pdf"/><div class="sh"><div class="dot" style="background:#2DD4BF;"></div><span class="sl">Opinionn Review Summary (PDF)</span></div><div class="ss">Opinionn &rarr; Reports &rarr; Review Summary &rarr; download PDF</div><div class="sn2" id="n-op">Click or drag PDF here</div></div>
     </div>
   </div>
@@ -2183,7 +2247,7 @@ select:focus,input:focus{border-color:var(--g);}
   </div>
 </div>
 <script>
-["wb","ua","tar","sar","rr","tr","ex","op"].forEach(k=>{
+["wb","ua","tar","sar","rr","tr","ex","op","kn"].forEach(k=>{
   document.getElementById("f-"+k).addEventListener("change",function(){
     if(this.files[0]){document.getElementById("s-"+k).classList.add("on");document.getElementById("n-"+k).textContent="✓ "+this.files[0].name;}
   });
@@ -2199,7 +2263,7 @@ async function run(){
   if(!document.getElementById("f-wb").files[0]){alert("Please upload the working workbook.");btn.disabled=false;return;}
   const form=new FormData();
   form.append("date",date);form.append("prop",prop);
-  ["wb","ua","tar","sar","rr","tr","ex","op"].forEach(k=>{const f=document.getElementById("f-"+k).files[0];if(f)form.append(k,f);});
+  ["wb","ua","tar","sar","rr","tr","ex","op","kn"].forEach(k=>{const f=document.getElementById("f-"+k).files[0];if(f)form.append(k,f);});
   L("Uploading and formatting...");P(20);
   try{
     const resp=await fetch("/format",{method:"POST",body:form});
