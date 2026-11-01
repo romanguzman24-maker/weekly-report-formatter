@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.61 — Docker deploy on Render free tier (enables Tesseract OCR)"""
+"""Weekly Report Formatter v9.62 — Docker deploy on Render free tier (enables Tesseract OCR)"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -1717,9 +1717,11 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
     style(26, 3, 'Move-in year', fill=BLUE, bold=True, align='center', border=AB)
     
     # Rows 27-28: NTV data (only border filled rows)
+    top_end = 26  # v9.62: lowest row used by NTV / Eviction / Traffic
     for r in (27, 28):
         v2 = src_vals.get((r, 2)); v3 = src_vals.get((r, 3))
         if v2 or v3:
+            top_end = max(top_end, r)
             cell_b = ws.cell(r, 2)
             if v2:
                 cell_b.value = v2
@@ -1733,7 +1735,7 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
             cell_c.font = f9; cell_c.border = AB
     
     # =========================================================================
-    # SECTION 5b: Eviction list (D25:E33) - v9.61, right of NTV
+    # SECTION 5b: Eviction list (D25:E) - v9.61, right of NTV
     # Tenant AR rows with status Eviction or Past (same rule as F14 '@ legal').
     # Balance is a live reference to Total Unpaid Charges on the Tenant AR tab.
     # =========================================================================
@@ -1749,17 +1751,12 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
             if str(tar_ws.cell(r, 1).value or '').strip().lower() == 'total': break
             if str(tar_ws.cell(r, 3).value or '').strip().lower() in ('eviction', 'past'):
                 ev_rows.append(r)
-        max_rows = 7  # rows 27-33; Reputation starts at row 34
-        shown = ev_rows if len(ev_rows) <= max_rows else ev_rows[:max_rows - 1]
-        for i, src_r in enumerate(shown):
+        # Blocks below move down as needed, so every eviction is listed
+        for i, src_r in enumerate(ev_rows):
             rn = 27 + i
             style(rn, EV_COL, str(tar_ws.cell(src_r, 1).value or '').strip(), align='center', border=AB)
             style(rn, EV_COL + 1, f"='{tar_ws.title}'!E{src_r}", align='right', border=AB, fmt='#,##0.00')
-        if len(ev_rows) > max_rows:
-            rn = 27 + len(shown)
-            ws.merge_cells(start_row=rn, start_column=EV_COL, end_row=rn, end_column=EV_COL + 1)
-            style(rn, EV_COL, f'+{len(ev_rows) - len(shown)} more, see Tenant AR', align='center', border=AB)
-            ws.cell(rn, EV_COL + 1).border = AB
+        top_end = max(top_end, 26 + len(ev_rows))
 
     # =========================================================================
     # SECTION 6: Weekly Traffic (rows 25-31, cols F-K; moved from E in v9.61)
@@ -1801,6 +1798,7 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
             cl = get_column_letter(c)
             style(rn, c, f'=SUM({cl}{tr_data_start}:{cl}{tr_data_end})',
                   fill=BLUE, bold=True, align='center', border=AB, fmt='0')
+        top_end = max(top_end, rn)
     
     # =========================================================================
     # SECTION 8: Reputation block (rows 34-43, cols E-K) — added in v9.50
@@ -1809,26 +1807,32 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
     # naturally below the traffic table. Renders with blank blue input cells
     # for manual entry (the Opinionn PDF is rasterized so auto-parse isn't
     # possible; Roman types the numbers from the PDF into the cells each week).
-    build_reputation_block(ws, reputation_data, start_row=34, start_col=2)
+    # v9.62: one blank row below the lowest of NTV / Eviction / Traffic,
+    # same spacing as between Reputation, Knock and Incomplete Certs.
+    rep_row = top_end + 2
+    build_reputation_block(ws, reputation_data, start_row=rep_row, start_col=2)
     
     # =========================================================================
     # SECTION 9: Knock CRM block (rows 45-51, cols E-H) - added in v9.55
     # =========================================================================
     # Sits directly below Reputation. Values pull by formula from the
     # 'Knock CRM <date>' tab, where the manager types the five Stats values.
-    build_knock_block(ws, knock_tab_name, start_row=45, start_col=2)
+    knock_row = rep_row + 11   # Reputation is 10 rows tall
+    build_knock_block(ws, knock_tab_name, start_row=knock_row, start_col=2)
+    final_row = knock_row + 6
 
     # =========================================================================
-    # SECTION 10: Incomplete Certs block (E53:I) - v9.57, replaces Expiring
-    # Leases. Sits under Knock in the E-K band; the B33 slot is now empty.
+    # SECTION 10: Incomplete Certs block - v9.57, replaces Expiring Leases.
+    # One blank row below Knock (v9.62: position follows the blocks above).
     # =========================================================================
     if certs_data and certs_tab:
         try:
-            last_r = build_certs_block(ws, certs_data, certs_tab, start_row=53, start_col=2)
-            for r in range(57, last_r + 1):
-                ws.cell(r, 1).border = BR
+            final_row = build_certs_block(ws, certs_data, certs_tab, start_row=knock_row + 8, start_col=2)
         except Exception:
             traceback.print_exc()
+    # Column A right border runs down to the last block
+    for r in range(57, final_row + 1):
+        ws.cell(r, 1).border = BR
     
     # =========================================================================
     # =========================================================================
@@ -2147,7 +2151,7 @@ def build_manager_summary(wb_out, date, prop, ws_summary, traffic_data=None, cer
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.61'})
+    return jsonify({'status':'ok','version':'9.62'})
 
 @app.route('/')
 def index():
@@ -2324,7 +2328,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.61</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.62</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
