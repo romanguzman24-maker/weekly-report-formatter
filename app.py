@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.58 — Docker deploy on Render free tier (enables Tesseract OCR)"""
+"""Weekly Report Formatter v9.59 — Docker deploy on Render free tier (enables Tesseract OCR)"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -1795,14 +1795,14 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
     # naturally below the traffic table. Renders with blank blue input cells
     # for manual entry (the Opinionn PDF is rasterized so auto-parse isn't
     # possible; Roman types the numbers from the PDF into the cells each week).
-    build_reputation_block(ws, reputation_data, start_row=34, start_col=5)
+    build_reputation_block(ws, reputation_data, start_row=34, start_col=2)
     
     # =========================================================================
     # SECTION 9: Knock CRM block (rows 45-51, cols E-H) - added in v9.55
     # =========================================================================
     # Sits directly below Reputation. Values pull by formula from the
     # 'Knock CRM <date>' tab, where the manager types the five Stats values.
-    build_knock_block(ws, knock_tab_name, start_row=45, start_col=5)
+    build_knock_block(ws, knock_tab_name, start_row=45, start_col=2)
 
     # =========================================================================
     # SECTION 10: Incomplete Certs block (E53:I) - v9.57, replaces Expiring
@@ -1810,7 +1810,7 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
     # =========================================================================
     if certs_data and certs_tab:
         try:
-            last_r = build_certs_block(ws, certs_data, certs_tab, start_row=53, start_col=5)
+            last_r = build_certs_block(ws, certs_data, certs_tab, start_row=53, start_col=2)
             for r in range(57, last_r + 1):
                 ws.cell(r, 1).border = BR
         except Exception:
@@ -1886,9 +1886,9 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
     # accommodate the Reputation per-platform table headers.
     widths = {
         'A': 16.57,   # 121px
-        'B': 14.43,   # 106px
+        'B': 20.00,   # v9.59: Reputation/Knock/Certs blocks start at B; fits "ApartmentRatings.com"
         'C': 15.43,   # 113px
-        'D': 2.71,    # 24px — narrow gutter between B-C and E
+        'D': 15.00,   # v9.59: was a 2.71 gutter; now a full column inside the B-aligned blocks
         'E': 24.14,   # 174px — wide for Weekly Traffic Source / "ApartmentRatings.com"
         'F': 13.00,   # Average Rating
         'G': 13.00,   # All Time Rating
@@ -2133,7 +2133,7 @@ def build_manager_summary(wb_out, date, prop, ws_summary, traffic_data=None, cer
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.58'})
+    return jsonify({'status':'ok','version':'9.59'})
 
 @app.route('/')
 def index():
@@ -2228,22 +2228,16 @@ def format_report():
             traceback.print_exc()
             knock_tab_name=None
         build_weekly_summary(wb_out,wb_ro,date,prop,ua_ws,tar_ws,sar_ws,tar_total,sar_total,rr_ws,traffic_data,certs_data,tar_red_count,reputation_data,knock_tab_name,certs_tab)
-        # Build Manager Summary tab (reads computed values from Weekly Summary)
-        ws_summary_name = next((n for n in wb_out.sheetnames if 'weekly summary' in n.lower()), None)
-        if ws_summary_name:
-            build_manager_summary(wb_out, date, prop, wb_out[ws_summary_name], traffic_data, certs_data, reputation_data)
-        for _n in wb_out.sheetnames:
-            if _n.strip().lower().startswith('manager summary'):
-                wb_out[_n].sheet_state = 'hidden'
+        # Manager Summary tab removed in v9.59
         wb_ro.close()
         def find_tab(names, prefix):
             return next((n for n in names if n.strip().lower().startswith(prefix.lower())), None)
         current=list(wb_out.sheetnames)
         ws_tab=find_tab(current,'weekly summary'); ua_tab=find_tab(current,'unit availability')
         rr_tab=find_tab(current,'rent roll'); tar_tab=find_tab(current,'tenant ar'); sar_tab=find_tab(current,'sub ar')
-        ic_tab=find_tab(current,'incomplete certs'); mgr_tab=find_tab(current,'manager summary')
+        ic_tab=find_tab(current,'incomplete certs')
         knock_tab=find_tab(current,'knock crm')
-        desired=[t for t in [ws_tab,ua_tab,rr_tab,tar_tab,sar_tab,ic_tab,knock_tab,mgr_tab] if t]
+        desired=[t for t in [ws_tab,ua_tab,rr_tab,tar_tab,sar_tab,ic_tab,knock_tab] if t]
         remaining=[t for t in current if t not in desired]
         ordered=desired+remaining
         for target_i,name in enumerate(ordered):
@@ -2316,7 +2310,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.58</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.59</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
