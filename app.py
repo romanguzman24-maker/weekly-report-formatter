@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.59 — Docker deploy on Render free tier (enables Tesseract OCR)"""
+"""Weekly Report Formatter v9.60 — Docker deploy on Render free tier (enables Tesseract OCR)"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -811,22 +811,7 @@ def fmt_certs(wb_out, raw_bytes, date, prop):
         cell.number_format = CERT_NUM_FMT
         cell.alignment = Alignment(horizontal='right', vertical='center')
 
-    # Row-level export: list every cert under the monthly table
-    if data.get('detail'):
-        dr = total_row + 2
-        for i, h in enumerate(['Effective Date', 'Unit', 'Name', 'Prog Type', 'Cert Type'], start=1):
-            cell = ws.cell(dr, i, value=h)
-            cell.fill = gfill(GRAY_AR); cell.font = gfont(bold=True); cell.border = bblack()
-            cell.alignment = Alignment(horizontal='center', vertical='center')
-        for k, d in enumerate(data['detail'], start=1):
-            vals = [d['date'], d['unit'], d['name'], d['prog'], d['type']]
-            for i, v in enumerate(vals, start=1):
-                cell = ws.cell(dr + k, i, value=v)
-                cell.font = gfont(); cell.fill = gfill(WHITE); cell.border = bgray()
-                cell.alignment = Alignment(horizontal='left' if i == 3 else 'center', vertical='center')
-                if i == 1: cell.number_format = 'MM/DD/YY'
-
-    for col, w in zip('ABCDE', (13, 12, 26, 16, 10)):
+    for col, w in zip('ABCDE', (12, 14, 15, 16, 10)):
         ws.column_dimensions[col].width = w
     ws.freeze_panes = 'A6'
     data['start_row'] = start_row
@@ -2133,7 +2118,7 @@ def build_manager_summary(wb_out, date, prop, ws_summary, traffic_data=None, cer
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.59'})
+    return jsonify({'status':'ok','version':'9.60'})
 
 @app.route('/')
 def index():
@@ -2310,7 +2295,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.59</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.60</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
