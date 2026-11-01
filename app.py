@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.60 — Docker deploy on Render free tier (enables Tesseract OCR)"""
+"""Weekly Report Formatter v9.61 — Docker deploy on Render free tier (enables Tesseract OCR)"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -1733,10 +1733,39 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
             cell_c.font = f9; cell_c.border = AB
     
     # =========================================================================
-    # SECTION 6: Weekly Traffic (rows 25-31, cols E-J)
+    # SECTION 5b: Eviction list (D25:E33) - v9.61, right of NTV
+    # Tenant AR rows with status Eviction or Past (same rule as F14 '@ legal').
+    # Balance is a live reference to Total Unpaid Charges on the Tenant AR tab.
+    # =========================================================================
+    EV_COL = 4  # column D
+    ws.merge_cells(start_row=25, start_column=EV_COL, end_row=25, end_column=EV_COL + 1)
+    style(25, EV_COL, 'Eviction', fill=BLUE, bold=True, align='center', border=AB)
+    ws.cell(25, EV_COL + 1).fill = gfill(BLUE); ws.cell(25, EV_COL + 1).border = AB
+    style(26, EV_COL, 'Unit #', fill=BLUE, bold=True, align='center', border=AB)
+    style(26, EV_COL + 1, 'Balance', fill=BLUE, bold=True, align='center', border=AB)
+    if tar_ws:
+        ev_rows = []
+        for r in range(7, tar_ws.max_row + 1):
+            if str(tar_ws.cell(r, 1).value or '').strip().lower() == 'total': break
+            if str(tar_ws.cell(r, 3).value or '').strip().lower() in ('eviction', 'past'):
+                ev_rows.append(r)
+        max_rows = 7  # rows 27-33; Reputation starts at row 34
+        shown = ev_rows if len(ev_rows) <= max_rows else ev_rows[:max_rows - 1]
+        for i, src_r in enumerate(shown):
+            rn = 27 + i
+            style(rn, EV_COL, str(tar_ws.cell(src_r, 1).value or '').strip(), align='center', border=AB)
+            style(rn, EV_COL + 1, f"='{tar_ws.title}'!E{src_r}", align='right', border=AB, fmt='#,##0.00')
+        if len(ev_rows) > max_rows:
+            rn = 27 + len(shown)
+            ws.merge_cells(start_row=rn, start_column=EV_COL, end_row=rn, end_column=EV_COL + 1)
+            style(rn, EV_COL, f'+{len(ev_rows) - len(shown)} more, see Tenant AR', align='center', border=AB)
+            ws.cell(rn, EV_COL + 1).border = AB
+
+    # =========================================================================
+    # SECTION 6: Weekly Traffic (rows 25-31, cols F-K; moved from E in v9.61)
     # =========================================================================
     if traffic_data:
-        TR_COL = 5  # column E
+        TR_COL = 6  # column F
         TR_COLS = 6
         tr_hdrs = ['Source', 'Leads', 'Prospects', 'Visits', 'Leases', 'Applications']
         active_sources = [(s, v) for s, v in traffic_data['rows'] if any(x != 0 for x in v)]
@@ -1874,8 +1903,8 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
         'B': 20.00,   # v9.59: Reputation/Knock/Certs blocks start at B; fits "ApartmentRatings.com"
         'C': 15.43,   # 113px
         'D': 15.00,   # v9.59: was a 2.71 gutter; now a full column inside the B-aligned blocks
-        'E': 24.14,   # 174px — wide for Weekly Traffic Source / "ApartmentRatings.com"
-        'F': 13.00,   # Average Rating
+        'E': 13.00,   # v9.61: Eviction balance column
+        'F': 24.14,   # v9.61: Weekly Traffic 'Source' column moved here from E
         'G': 13.00,   # All Time Rating
         'H': 14.00,   # Positive Reviews
         'I': 14.00,   # Negative Reviews
@@ -2118,7 +2147,7 @@ def build_manager_summary(wb_out, date, prop, ws_summary, traffic_data=None, cer
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.60'})
+    return jsonify({'status':'ok','version':'9.61'})
 
 @app.route('/')
 def index():
@@ -2295,7 +2324,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.60</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.61</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
