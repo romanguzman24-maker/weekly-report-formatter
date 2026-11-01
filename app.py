@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.56 — Docker deploy on Render free tier (enables Tesseract OCR)"""
+"""Weekly Report Formatter v9.57 — Docker deploy on Render free tier (enables Tesseract OCR)"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -561,200 +561,237 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
     return ws, len(V), len(O)
 
 # ============================================================================
-# EXPIRING LEASES (120 days) - new in v9.49
+# INCOMPLETE CERTS (Certs by Month) - v9.57, replaces Expiring Leases
 # ============================================================================
-def parse_expiring(raw_bytes):
-    """Parse Yardi Expiring Leases export. Returns list of dict rows, sorted oldest -> newest.
-    Robust to variations in header text, header position, and date format (text or datetime)."""
+CERT_COLS = ['Month', 'Status', 'Incomplete Certs', 'Annual Certs Due', 'Total']
+
+
+def _cert_num(v):
+    """Yardi shows zero as '-' (or blank). Return an int."""
+    if v is None:
+        return 0
+    if isinstance(v, (int, float)):
+        return int(round(v))
+    t = str(v).strip().replace(',', '')
+    if t in ('', '-', '--', '—', '–'):
+        return 0
+    try:
+        return int(round(float(t)))
+    except ValueError:
+        return 0
+
+
+def _cert_month(v):
+    """Return (label 'May 2025', sort key) or (None, None)."""
+    if isinstance(v, datetime):
+        return v.strftime('%b %Y'), (v.year, v.month)
+    try:
+        from datetime import date as _d
+        if isinstance(v, _d):
+            return v.strftime('%b %Y'), (v.year, v.month)
+    except Exception:
+        pass
+    if isinstance(v, str):
+        t = v.strip()
+        for f in ('%b %Y', '%B %Y', '%m/%Y', '%m/%d/%Y', '%Y-%m', '%Y-%m-%d', '%b-%y', '%b %y'):
+            try:
+                d = datetime.strptime(t, f)
+                return d.strftime('%b %Y'), (d.year, d.month)
+            except ValueError:
+                pass
+    return None, None
+
+
+def parse_certs(raw_bytes):
+    """Parse the Yardi 'Certs by Month' export.
+
+    Returns dict: {'as_of': str or None, 'rows': [ {Month, Status,
+    Incomplete Certs, Annual Certs Due, Total} ... ]} sorted oldest -> newest.
+    Header row is found by a 'Month' cell plus a cert column; columns are
+    mapped by header text so extra or reordered columns don't break it.
+    """
     wb = openpyxl.load_workbook(io.BytesIO(raw_bytes), data_only=True, read_only=True)
     ws = wb.active
-    headers, rows = None, []
-    header_keywords = ('lease expires', 'lease expiration', 'expires', 'lease end', 'expiration date')
-    
-    def parse_date(val):
-        """Convert val to datetime if possible. Handles datetime, date, and various text formats."""
-        if val is None:
-            return None
-        if isinstance(val, datetime):
-            return val
-        # Handle date object (without time)
-        try:
-            from datetime import date as date_cls
-            if isinstance(val, date_cls):
-                return datetime(val.year, val.month, val.day)
-        except: pass
-        if isinstance(val, str):
-            s = val.strip()
-            if not s:
-                return None
-            # Try several common date formats
-            for fmt in ('%m/%d/%Y', '%m/%d/%y', '%Y-%m-%d', '%m-%d-%Y', '%m-%d-%y',
-                        '%d/%m/%Y', '%b %d, %Y', '%B %d, %Y', '%m/%d/%Y %H:%M:%S'):
-                try:
-                    return datetime.strptime(s, fmt)
-                except: pass
-        return None
-    
+    as_of = None
+    idx = None
+    rows = []
     for r in ws.iter_rows(values_only=True):
-        if headers is None:
-            # Look for any cell in the row that matches one of the header keywords
-            if r:
-                row_lower = [str(c).strip().lower() if c is not None else '' for c in r]
-                if any(any(kw in cell for kw in header_keywords) for cell in row_lower):
-                    headers = [str(h).strip() if h is not None else '' for h in r]
-                    # Find the index of the "Lease Expires" / similar column
-                    for i, cell in enumerate(row_lower):
-                        if any(kw in cell for kw in header_keywords):
-                            expires_col_idx = i
-                            break
+        if not r:
+            continue
+        cells = list(r)
+        low = [str(c).strip().lower() if c is not None else '' for c in cells]
+        if idx is None:
+            # pick up the "As of" date above the header
+            for i, t in enumerate(low):
+                if t.startswith('as of'):
+                    rest = t[5:].strip(' :')
+                    if rest:
+                        as_of = str(cells[i]).strip()[5:].strip(' :')
                     else:
-                        expires_col_idx = 0
+                        for v in cells[i + 1:]:
+                            if v not in (None, ''):
+                                as_of = v.strftime('%m/%d/%Y') if isinstance(v, datetime) else str(v).strip()
+                                break
+                    break
+            if 'month' in low and any('cert' in t for t in low):
+                idx = {}
+                for i, t in enumerate(low):
+                    if t == 'month': idx['Month'] = i
+                    elif t == 'status': idx['Status'] = i
+                    elif 'incomplete' in t: idx['Incomplete Certs'] = i
+                    elif 'annual' in t: idx['Annual Certs Due'] = i
+                    elif t == 'total': idx['Total'] = i
             continue
-        if not r or all(v is None or (isinstance(v, str) and not v.strip()) for v in r):
+        first = next((t for t in low if t), '')
+        if first.startswith('total') or first.startswith('grand'):
+            break
+        mcell = cells[idx['Month']] if idx['Month'] < len(cells) else None
+        label, sk = _cert_month(mcell)
+        if label is None:
             continue
-        # Skip total/summary rows: check the first few columns for signal words
-        for chk_idx in range(min(3, len(r))):
-            chk = r[chk_idx]
-            if isinstance(chk, str) and any(k in chk.lower() for k in ('total', 'grand', 'summary', 'village at')):
-                break
-        else:
-            # No skip-keyword found in first 3 cols; try to parse the date
-            date_val = r[expires_col_idx] if expires_col_idx < len(r) else None
-            parsed = parse_date(date_val)
-            if parsed is None:
-                continue
-            row_dict = {headers[i]: r[i] if i < len(r) else None for i in range(len(headers))}
-            # Normalize: ensure 'Lease Expires' key exists with parsed datetime
-            row_dict['Lease Expires'] = parsed
-            rows.append(row_dict)
+        def g(k):
+            i = idx.get(k)
+            return cells[i] if i is not None and i < len(cells) else None
+        inc = _cert_num(g('Incomplete Certs'))
+        ann = _cert_num(g('Annual Certs Due'))
+        tot = _cert_num(g('Total')) if 'Total' in idx else inc + ann
+        status = g('Status')
+        rows.append({'Month': label, '_sort': sk,
+                     'Status': str(status).strip() if status not in (None, '') else '',
+                     'Incomplete Certs': inc, 'Annual Certs Due': ann, 'Total': tot})
     wb.close()
-    rows.sort(key=lambda x: x.get('Lease Expires') or datetime.max)
-    return rows
+    rows.sort(key=lambda x: x['_sort'])
+    return {'as_of': as_of, 'rows': rows}
 
 
-def build_monthly_counts(rows):
-    """Returns list of (month_label, count) sorted oldest -> newest."""
-    counts = OrderedDict()
-    for r in rows:
-        d = r.get('Lease Expires')
-        if not isinstance(d, datetime):
-            continue
-        key = d.strftime('%b %Y')
-        sk = (d.year, d.month)
-        if key not in counts:
-            counts[key] = {'sort': sk, 'count': 0}
-        counts[key]['count'] += 1
-    return [(k, v['count']) for k, v in sorted(counts.items(), key=lambda kv: kv[1]['sort'])]
+CERT_NUM_FMT = '0;-0;"-"'   # zero shows as a dash, like the Yardi report
 
 
-def fmt_expiring(wb_out, raw_bytes, date, prop):
-    """Build the formatted 'Expiring Leases (120 days) MM.DD.YY' tab."""
-    rows = parse_expiring(raw_bytes)
-    out_cols = ['Lease Expires','Unit','Resident','Market Rent','Current Rent',
-                'Loss to Lease','Current Lease Term','Months At Property',
-                'MTM?','Appr Status','Comments']
-    n_cols = len(out_cols)
-    last_letter = get_column_letter(n_cols)
+def fmt_certs(wb_out, raw_bytes, date, prop):
+    """Build the formatted 'Incomplete Certs MM.DD.YY' tab.
 
-    tab = f'Expiring Leases {date}'
+    Layout: title rows 1-3 (green), header row 5 (gray), data from row 6,
+    bold Total row with SUM formulas. Returns (ws, certs_data, tab_name).
+    """
+    data = parse_certs(raw_bytes)
+    rows = data['rows']
+    n_cols = len(CERT_COLS)
+    tab = f'Incomplete Certs {date}'
     if tab in wb_out.sheetnames: del wb_out[tab]
     ws = wb_out.create_sheet(tab)
 
-    # Title rows 1-3, green
     for r in range(1, 4):
         ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=n_cols)
-        for c in range(1, n_cols+1):
+        for c in range(1, n_cols + 1):
             cell = ws.cell(r, c)
             cell.fill = gfill(GREEN)
             cell.font = gfont(bold=(r != 3), color=DARKGRAY)
             cell.alignment = Alignment(horizontal='center', vertical='center')
     ws.cell(1, 1).value = prop
-    ws.cell(2, 1).value = 'Expiring Leases (120 days)'
-    ws.cell(3, 1).value = f'As Of: {date}'
+    ws.cell(2, 1).value = 'Incomplete Certs (Certs by Month)'
+    ws.cell(3, 1).value = f"As Of: {data['as_of'] or date}"
 
-    # Header row 5 (gray), with row 4 as gray spacer band
-    for c in range(1, n_cols+1):
+    for c in range(1, n_cols + 1):
         cell = ws.cell(4, c)
-        cell.fill = gfill(GRAY_AR)
-        cell.font = gfont(bold=True)
-        cell.border = bblack()
-        cell.alignment = Alignment(horizontal='center', vertical='center')
-    for i, label in enumerate(out_cols, start=1):
+        cell.fill = gfill(GRAY_AR); cell.border = bblack()
+    for i, label in enumerate(CERT_COLS, start=1):
         cell = ws.cell(5, i, value=label)
         cell.fill = gfill(GRAY_AR)
         cell.font = gfont(bold=True)
         cell.border = bblack()
-        cell.alignment = Alignment(horizontal='center', vertical='center')
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
 
-    # Data rows
     start_row = 6
     for i, row in enumerate(rows):
         r = start_row + i
-        vals = [
-            row.get('Lease Expires'),
-            row.get('Unit'),
-            row.get('Resident'),
-            row.get('Market Rent'),
-            row.get('Current Rent'),
-            row.get('Loss to Lease'),
-            row.get('Current Lease Term'),
-            row.get('Months At Property'),
-            row.get('MTM?'),
-            row.get('Appr Status'),
-            row.get('Comments ') or row.get('Comments') or None,
-        ]
-        for ci, v in enumerate(vals, start=1):
-            cell = ws.cell(r, ci, value=v)
+        for ci, label in enumerate(CERT_COLS, start=1):
+            cell = ws.cell(r, ci, value=row[label])
             cell.font = gfont()
             cell.fill = gfill(WHITE)
             cell.border = bgray()
-            label = out_cols[ci-1]
-            if label == 'Lease Expires':
-                cell.number_format = 'MM/DD/YY'
-                cell.alignment = Alignment(horizontal='center', vertical='center')
-            elif label in ('Market Rent','Current Rent','Loss to Lease'):
-                cell.number_format = '#,##0'
-                cell.alignment = Alignment(horizontal='right', vertical='center')
-            elif label in ('Unit','Current Lease Term','Months At Property','MTM?','Appr Status'):
-                cell.alignment = Alignment(horizontal='center', vertical='center')
+            if ci <= 2:
+                cell.alignment = Alignment(horizontal='center' if ci == 1 else 'left', vertical='center')
             else:
-                cell.alignment = Alignment(horizontal='left', vertical='center')
-        ws.row_dimensions[r].height = 15.0
+                cell.number_format = CERT_NUM_FMT
+                cell.alignment = Alignment(horizontal='right', vertical='center')
 
-    # Totals row
-    last_data_row = start_row + len(rows) - 1
-    total_row = last_data_row + 1 if rows else start_row
-
-    for col in range(1, n_cols+1):
-        cell = ws.cell(total_row, col)
+    last = start_row + len(rows) - 1
+    total_row = last + 1 if rows else start_row
+    for c in range(1, n_cols + 1):
+        cell = ws.cell(total_row, c)
         cell.fill = gfill(GRAY_AR)
         cell.font = gfont(bold=True)
         cell.border = bblack()
     ws.cell(total_row, 1).value = 'Total'
-    ws.cell(total_row, 1).alignment = Alignment(horizontal='left', vertical='center')
+    for ci in range(3, n_cols + 1):
+        cl = get_column_letter(ci)
+        cell = ws.cell(total_row, ci, value=(f'=SUM({cl}{start_row}:{cl}{last})' if rows else 0))
+        cell.number_format = CERT_NUM_FMT
+        cell.alignment = Alignment(horizontal='right', vertical='center')
 
-    if rows:
-        ws.cell(total_row, 3).value = f'=COUNTA(C{start_row}:C{last_data_row})'
-        ws.cell(total_row, 3).alignment = Alignment(horizontal='center', vertical='center')
-        for ci, label in enumerate(out_cols, start=1):
-            if label in ('Market Rent','Current Rent','Loss to Lease'):
-                cl = get_column_letter(ci)
-                cell = ws.cell(total_row, ci, value=f'=SUM({cl}{start_row}:{cl}{last_data_row})')
-                cell.number_format = '#,##0'
-                cell.alignment = Alignment(horizontal='right', vertical='center')
-                cell.fill = gfill(GRAY_AR)
-                cell.font = gfont(bold=True)
-                cell.border = bblack()
-
-    # Column widths
-    widths = {'Lease Expires':13,'Unit':9,'Resident':28,'Market Rent':13,'Current Rent':13,
-              'Loss to Lease':13,'Current Lease Term':13,'Months At Property':13,
-              'MTM?':8,'Appr Status':13,'Comments':40}
-    for i, label in enumerate(out_cols, start=1):
-        ws.column_dimensions[get_column_letter(i)].width = widths.get(label, 12)
-
+    for col, w in zip('ABCDE', (12, 12, 15, 16, 10)):
+        ws.column_dimensions[col].width = w
     ws.freeze_panes = 'A6'
-    return ws, rows
+    data['start_row'] = start_row
+    data['total_row'] = total_row
+    return ws, data, tab
+
+
+def build_certs_block(ws, certs_data, certs_tab, start_row=53, start_col=5):
+    """Incomplete Certs block on Weekly Summary at E53:I (default).
+
+    Same look as the Yardi 'Certs by Month' report, minus the yellow:
+    blue headers like the other summary blocks, white data rows, bold total.
+    Cells are formulas pointing at the Incomplete Certs tab.
+    """
+    BLUE = 'FFBDD7EE'
+    AB = bblack()
+    n = len(CERT_COLS)
+    end_col = start_col + n - 1
+    rows = certs_data['rows']
+    q = f"'{certs_tab}'"
+
+    def put(r, c, v, bold=False, fill=None, align='center', fmt=None):
+        cell = ws.cell(r, c)
+        cell.value = v
+        cell.font = gfont(bold=bold, sz=9)
+        cell.fill = gfill(fill or WHITE)
+        cell.alignment = galign(align)
+        cell.border = AB
+        if fmt: cell.number_format = fmt
+        return cell
+
+    title = 'Incomplete Certs'
+    if certs_data.get('as_of'):
+        title += f" (as of {certs_data['as_of']})"
+    for c in range(start_col, end_col + 1):
+        put(start_row, c, title if c == start_col else None, bold=True, fill=BLUE)
+    ws.merge_cells(start_row=start_row, start_column=start_col,
+                   end_row=start_row, end_column=end_col)
+
+    hdr = start_row + 1
+    for i, h in enumerate(CERT_COLS):
+        put(hdr, start_col + i, h, bold=True, fill=BLUE)
+
+    src0 = certs_data['start_row']
+    for i in range(len(rows)):
+        r = hdr + 1 + i
+        sr = src0 + i
+        for j in range(n):
+            sc = get_column_letter(j + 1)
+            put(r, start_col + j, f'={q}!{sc}{sr}',
+                align='center' if j < 2 else 'right',
+                fmt=None if j < 2 else CERT_NUM_FMT)
+
+    tr = hdr + 1 + len(rows)
+    put(tr, start_col, 'Total', bold=True, align='left')
+    put(tr, start_col + 1, None, bold=True)
+    for j in range(2, n):
+        cl = get_column_letter(start_col + j)
+        v = f'=SUM({cl}{hdr + 1}:{cl}{tr - 1})' if rows else 0
+        put(tr, start_col + j, v, bold=True, align='right', fmt=CERT_NUM_FMT)
+    return tr
+
 # ============================================================================
 
 TRAFFIC_SOURCES=[
@@ -1366,7 +1403,7 @@ def build_knock_block(ws, knock_tab_name, start_row=45, start_col=5):
             cell.border = AB
 
 
-def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar_ws=None, tar_total=0, sar_total=0, rr_ws=None, traffic_data=None, expiring_rows=None, tar_red_count=0, reputation_data=None, knock_tab_name=None):
+def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar_ws=None, tar_total=0, sar_total=0, rr_ws=None, traffic_data=None, certs_data=None, tar_red_count=0, reputation_data=None, knock_tab_name=None, certs_tab=None):
     """
     Build Weekly Summary per spec:
       - 10 cols wide (A-J), ~56 rows
@@ -1655,46 +1692,6 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
                   fill=BLUE, bold=True, align='center', border=AB, fmt='0')
     
     # =========================================================================
-    # SECTION 7: Expiring Leases (rows 33-56)
-    # =========================================================================
-    if expiring_rows:
-        monthly = build_monthly_counts(expiring_rows)
-        EX_COL = 2  # column B
-        ex_start = 33
-        
-        # B33:C33 merged header
-        ws.merge_cells(start_row=ex_start, start_column=EX_COL,
-                       end_row=ex_start, end_column=EX_COL + 1)
-        style(ex_start, EX_COL, 'Expiring Leases (120 days)',
-              fill=BLUE, bold=True, align='center', border=AB)
-        ws.cell(ex_start, EX_COL + 1).fill = gfill(BLUE)
-        ws.cell(ex_start, EX_COL + 1).border = AB
-        
-        # Sub-headers
-        sub_r = ex_start + 1
-        style(sub_r, EX_COL, 'Month', fill=BLUE, bold=True, align='center', border=AB)
-        style(sub_r, EX_COL + 1, 'Count', fill=BLUE, bold=True, align='center', border=AB)
-        
-        # Data
-        data_start = sub_r + 1
-        for i, (m, cnt) in enumerate(monthly):
-            r = data_start + i
-            style(r, EX_COL, m, align='center', border=AB)
-            style(r, EX_COL + 1, cnt, align='center', border=AB, fmt='0')
-        
-        # Total
-        total_r = data_start + len(monthly)
-        last_data_r = total_r - 1 if monthly else data_start
-        style(total_r, EX_COL, 'Total', fill=BLUE, bold=True, align='center', border=AB)
-        if monthly:
-            count_letter = get_column_letter(EX_COL + 1)
-            style(total_r, EX_COL + 1,
-                  f'=SUM({count_letter}{data_start}:{count_letter}{last_data_r})',
-                  fill=BLUE, bold=True, align='center', border=AB, fmt='0')
-        else:
-            style(total_r, EX_COL + 1, 0, fill=BLUE, bold=True, align='center', border=AB, fmt='0')
-    
-    # =========================================================================
     # SECTION 8: Reputation block (rows 34-43, cols E-K) — added in v9.50
     # =========================================================================
     # Builds at E34:K43, in the same column band as Weekly Traffic so it sits
@@ -1709,6 +1706,18 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
     # Sits directly below Reputation. Values pull by formula from the
     # 'Knock CRM <date>' tab, where the manager types the five Stats values.
     build_knock_block(ws, knock_tab_name, start_row=45, start_col=5)
+
+    # =========================================================================
+    # SECTION 10: Incomplete Certs block (E53:I) - v9.57, replaces Expiring
+    # Leases. Sits under Knock in the E-K band; the B33 slot is now empty.
+    # =========================================================================
+    if certs_data and certs_tab:
+        try:
+            last_r = build_certs_block(ws, certs_data, certs_tab, start_row=53, start_col=5)
+            for r in range(57, last_r + 1):
+                ws.cell(r, 1).border = BR
+        except Exception:
+            traceback.print_exc()
     
     # =========================================================================
     # =========================================================================
@@ -1795,7 +1804,7 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
         ws.column_dimensions[col].width = w
 
 
-def build_manager_summary(wb_out, date, prop, ws_summary, traffic_data=None, expiring_rows=None, reputation_data=None):
+def build_manager_summary(wb_out, date, prop, ws_summary, traffic_data=None, certs_data=None, reputation_data=None):
     """
     Build a manager-friendly bullet-point summary tab using values already computed
     on the Weekly Summary tab. Last tab in workbook.
@@ -1970,35 +1979,25 @@ def build_manager_summary(wb_out, date, prop, ws_summary, traffic_data=None, exp
         ask_questions(r); r += 1
         r += 1
     
-    # === EXPIRING LEASES SECTION (day-bucket view) ===
-    if expiring_rows:
-        from datetime import datetime as _dt, timedelta as _td
-        today = _dt.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        past_due = 0
-        within_30 = 0
-        within_60 = 0
-        within_90 = 0
-        within_120 = 0
-        for row in expiring_rows:
-            exp_date = row.get('Lease Expires')
-            if exp_date is None or not isinstance(exp_date, _dt):
-                continue
-            days_until = (exp_date - today).days
-            if days_until < 0:
-                past_due += 1
-            else:
-                # Cumulative buckets
-                if days_until <= 30: within_30 += 1
-                if days_until <= 60: within_60 += 1
-                if days_until <= 90: within_90 += 1
-                if days_until <= 120: within_120 += 1
-        total_expiring = past_due + within_120  # past due + everything in next 120 days
-        section_header(r, 'AND FOR EXPIRING LEASES'); r += 1
-        bullet(r, f"Past due (already expired): {fmt_num(past_due)}"); r += 1
-        bullet(r, f"Expiring within 30 days: {fmt_num(within_30)}"); r += 1
-        bullet(r, f"Expiring within 60 days: {fmt_num(within_60)}"); r += 1
-        bullet(r, f"Expiring within 90 days: {fmt_num(within_90)}"); r += 1
-        bullet(r, f"Expiring within 120 days: {fmt_num(within_120)}"); r += 1
+    # === INCOMPLETE CERTS SECTION (v9.57) ===
+    if certs_data and certs_data.get('rows'):
+        crows = certs_data['rows']
+        inc = sum(x['Incomplete Certs'] for x in crows)
+        ann = sum(x['Annual Certs Due'] for x in crows)
+        tot = sum(x['Total'] for x in crows)
+        past = [x for x in crows if 'past' in x['Status'].lower()]
+        past_tot = sum(x['Total'] for x in past)
+        open_months = [x for x in crows if x['Total'] > 0]
+        hdr = 'AND FOR INCOMPLETE CERTS'
+        if certs_data.get('as_of'):
+            hdr += f" (AS OF {certs_data['as_of']})"
+        section_header(r, hdr); r += 1
+        bullet(r, f"Total open certs: {fmt_num(tot)} ({fmt_num(inc)} incomplete, {fmt_num(ann)} annual certs due)"); r += 1
+        bullet(r, f"Past due: {fmt_num(past_tot)}"); r += 1
+        if open_months:
+            bullet(r, f"Oldest open month: {open_months[0]['Month']}"); r += 1
+            worst = max(open_months, key=lambda x: x['Total'])
+            bullet(r, f"Heaviest month: {worst['Month']} ({fmt_num(worst['Total'])})"); r += 1
         ask_questions(r); r += 1
         r += 1
     
@@ -2037,7 +2036,7 @@ def build_manager_summary(wb_out, date, prop, ws_summary, traffic_data=None, exp
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.56'})
+    return jsonify({'status':'ok','version':'9.57'})
 
 @app.route('/')
 def index():
@@ -2094,16 +2093,15 @@ def format_report():
         traffic_data=None
         tr_f=request.files.get('tr')
         if tr_f: traffic_data=parse_traffic(tr_f.read(),date)
-        # Expiring Leases
-        expiring_rows=None
-        ex_f=request.files.get('ex')
-        if ex_f:
-            ex_bytes = ex_f.read()
+        # Incomplete Certs (v9.57, replaces Expiring Leases)
+        certs_data=None; certs_tab=None
+        ic_f=request.files.get('ic')
+        if ic_f:
             try:
-                _, expiring_rows = fmt_expiring(wb_out, ex_bytes, date, prop)
+                _, certs_data, certs_tab = fmt_certs(wb_out, ic_f.read(), date, prop)
             except Exception:
                 traceback.print_exc()
-                expiring_rows = None
+                certs_data = None; certs_tab = None
         # Opinionn Review Summary PDF (new in v9.53). OCR via Tesseract reads
         # the rasterized PDF and pulls out the cards row (Overall + per-platform
         # ratings and review counts). If Tesseract isn't installed or OCR fails,
@@ -2132,20 +2130,23 @@ def format_report():
         except Exception:
             traceback.print_exc()
             knock_tab_name=None
-        build_weekly_summary(wb_out,wb_ro,date,prop,ua_ws,tar_ws,sar_ws,tar_total,sar_total,rr_ws,traffic_data,expiring_rows,tar_red_count,reputation_data,knock_tab_name)
+        build_weekly_summary(wb_out,wb_ro,date,prop,ua_ws,tar_ws,sar_ws,tar_total,sar_total,rr_ws,traffic_data,certs_data,tar_red_count,reputation_data,knock_tab_name,certs_tab)
         # Build Manager Summary tab (reads computed values from Weekly Summary)
         ws_summary_name = next((n for n in wb_out.sheetnames if 'weekly summary' in n.lower()), None)
         if ws_summary_name:
-            build_manager_summary(wb_out, date, prop, wb_out[ws_summary_name], traffic_data, expiring_rows, reputation_data)
+            build_manager_summary(wb_out, date, prop, wb_out[ws_summary_name], traffic_data, certs_data, reputation_data)
+        for _n in wb_out.sheetnames:
+            if _n.strip().lower().startswith('manager summary'):
+                wb_out[_n].sheet_state = 'hidden'
         wb_ro.close()
         def find_tab(names, prefix):
             return next((n for n in names if n.strip().lower().startswith(prefix.lower())), None)
         current=list(wb_out.sheetnames)
         ws_tab=find_tab(current,'weekly summary'); ua_tab=find_tab(current,'unit availability')
         rr_tab=find_tab(current,'rent roll'); tar_tab=find_tab(current,'tenant ar'); sar_tab=find_tab(current,'sub ar')
-        ex_tab=find_tab(current,'expiring leases'); mgr_tab=find_tab(current,'manager summary')
+        ic_tab=find_tab(current,'incomplete certs'); mgr_tab=find_tab(current,'manager summary')
         knock_tab=find_tab(current,'knock crm')
-        desired=[t for t in [ws_tab,ua_tab,rr_tab,tar_tab,sar_tab,ex_tab,knock_tab,mgr_tab] if t]
+        desired=[t for t in [ws_tab,ua_tab,rr_tab,tar_tab,sar_tab,ic_tab,knock_tab,mgr_tab] if t]
         remaining=[t for t in current if t not in desired]
         ordered=desired+remaining
         for target_i,name in enumerate(ordered):
@@ -2234,7 +2235,7 @@ select:focus,input:focus{border-color:var(--g);}
       <div class="slot" id="s-sar"><input type="file" id="f-sar" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#8CB5F9;"></div><span class="sl">Subsidy AR</span></div><div class="ss">Analytics &rarr; Receivable Aging (HUD Only)</div><div class="sn2" id="n-sar">Click or drag file here</div></div>
       <div class="slot" id="s-rr"><input type="file" id="f-rr" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#C4A0F5;"></div><span class="sl">Rent Roll</span></div><div class="ss">Onsite &rarr; Analytics &rarr; Rent Roll</div><div class="sn2" id="n-rr">Click or drag file here</div></div>
       <div class="slot" id="s-tr"><input type="file" id="f-tr" accept=".xlsx,.xls,.xlsm,.csv"/><div class="sh"><div class="dot" style="background:#F5C842;"></div><span class="sl">Weekly Traffic</span></div><div class="ss">Ad Spend &amp; Traffic Report (CSV or Excel)</div><div class="sn2" id="n-tr">Click or drag file here</div></div>
-      <div class="slot" id="s-ex"><input type="file" id="f-ex" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#FDD868;"></div><span class="sl">Expiring Leases (120 days)</span></div><div class="ss">Analytics &rarr; Expiring Leases</div><div class="sn2" id="n-ex">Click or drag file here</div></div>
+      <div class="slot" id="s-ic"><input type="file" id="f-ic" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#FDD868;"></div><span class="sl">Incomplete Certs</span></div><div class="ss">Yardi &rarr; Certs by Month</div><div class="sn2" id="n-ic">Click or drag file here</div></div>
       <div class="slot full" id="s-kn"><input type="file" id="f-kn" accept="image/png,image/jpeg"/><div class="sh"><div class="dot" style="background:#F5A0C8;"></div><span class="sl">Knock CRM Stats (snip)</span></div><div class="ss">Knock CRM &rarr; dashboard &rarr; snip the Stats card</div><div class="sn2" id="n-kn">Click or drag image here</div></div>
       <div class="slot full" id="s-op"><input type="file" id="f-op" accept=".pdf"/><div class="sh"><div class="dot" style="background:#2DD4BF;"></div><span class="sl">Opinionn Review Summary (PDF)</span></div><div class="ss">Opinionn &rarr; Reports &rarr; Review Summary &rarr; download PDF</div><div class="sn2" id="n-op">Click or drag PDF here</div></div>
     </div>
@@ -2247,7 +2248,7 @@ select:focus,input:focus{border-color:var(--g);}
   </div>
 </div>
 <script>
-["wb","ua","tar","sar","rr","tr","ex","op","kn"].forEach(k=>{
+["wb","ua","tar","sar","rr","tr","ic","op","kn"].forEach(k=>{
   document.getElementById("f-"+k).addEventListener("change",function(){
     if(this.files[0]){document.getElementById("s-"+k).classList.add("on");document.getElementById("n-"+k).textContent="✓ "+this.files[0].name;}
   });
@@ -2263,7 +2264,7 @@ async function run(){
   if(!document.getElementById("f-wb").files[0]){alert("Please upload the working workbook.");btn.disabled=false;return;}
   const form=new FormData();
   form.append("date",date);form.append("prop",prop);
-  ["wb","ua","tar","sar","rr","tr","ex","op","kn"].forEach(k=>{const f=document.getElementById("f-"+k).files[0];if(f)form.append(k,f);});
+  ["wb","ua","tar","sar","rr","tr","ic","op","kn"].forEach(k=>{const f=document.getElementById("f-"+k).files[0];if(f)form.append(k,f);});
   L("Uploading and formatting...");P(20);
   try{
     const resp=await fetch("/format",{method:"POST",body:form});
