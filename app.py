@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.57 — Docker deploy on Render free tier (enables Tesseract OCR)"""
+"""Weekly Report Formatter v9.58 — Docker deploy on Render free tier (enables Tesseract OCR)"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -602,7 +602,82 @@ def _cert_month(v):
     return None, None
 
 
-def parse_certs(raw_bytes):
+def _report_date(date):
+    """'11.02.26' -> datetime, or today if it doesn't parse."""
+    for f in ('%m.%d.%y', '%m.%d.%Y', '%m/%d/%y', '%m/%d/%Y'):
+        try:
+            return datetime.strptime(str(date).strip(), f)
+        except Exception:
+            pass
+    return datetime.now()
+
+
+def _parse_cert_detail(ws, date):
+    """Row-level Yardi export (Effective Date, Unit, Name, Prog Type, Cert Type).
+
+    Rolls rows up by month. TC and LP rows for the same unit, date and cert
+    type count once. AR goes to Annual Certs Due; every other cert type
+    (MI, IR, ...) goes to Incomplete Certs. Status per month is relative to
+    the report date: Past due / Due this month / Upcoming.
+    """
+    rep = _report_date(date)
+    idx = None
+    seen = set()
+    detail = []
+    months = {}
+    for r in ws.iter_rows(values_only=True):
+        if not r:
+            continue
+        cells = list(r)
+        low = [str(c).strip().lower() if c is not None else '' for c in cells]
+        if idx is None:
+            if any('effective' in t for t in low) and any('cert type' in t for t in low):
+                idx = {}
+                for i, t in enumerate(low):
+                    if 'effective' in t: idx['date'] = i
+                    elif t == 'unit': idx['unit'] = i
+                    elif t in ('name', 'resident', 'tenant'): idx['name'] = i
+                    elif 'prog' in t: idx['prog'] = i
+                    elif 'cert type' in t: idx['type'] = i
+            continue
+        def g(k):
+            i = idx.get(k)
+            return cells[i] if i is not None and i < len(cells) else None
+        label, sk = _cert_month(g('date'))
+        if label is None:
+            continue
+        d = g('date')
+        if not isinstance(d, datetime):
+            try:
+                d = datetime.strptime(str(d).strip(), '%m/%d/%Y')
+            except Exception:
+                d = datetime(sk[0], sk[1], 1)
+        unit = str(g('unit') or '').strip()
+        ctype = str(g('type') or '').strip().upper()
+        detail.append({'date': d, 'unit': unit, 'name': g('name'),
+                       'prog': g('prog'), 'type': ctype})
+        key = (unit, d.date(), ctype)
+        if key in seen:
+            continue
+        seen.add(key)
+        m = months.setdefault(sk, {'Month': label, '_sort': sk,
+                                   'Incomplete Certs': 0, 'Annual Certs Due': 0})
+        if ctype == 'AR':
+            m['Annual Certs Due'] += 1
+        else:
+            m['Incomplete Certs'] += 1
+    rows = []
+    cur = (rep.year, rep.month)
+    for sk in sorted(months):
+        m = months[sk]
+        m['Total'] = m['Incomplete Certs'] + m['Annual Certs Due']
+        m['Status'] = 'Past due' if sk < cur else ('Due this month' if sk == cur else 'Upcoming')
+        rows.append(m)
+    detail.sort(key=lambda x: (x['date'], x['unit']))
+    return {'as_of': rep.strftime('%m/%d/%Y'), 'rows': rows, 'detail': detail}
+
+
+def parse_certs(raw_bytes, date=None):
     """Parse the Yardi 'Certs by Month' export.
 
     Returns dict: {'as_of': str or None, 'rows': [ {Month, Status,
@@ -612,6 +687,13 @@ def parse_certs(raw_bytes):
     """
     wb = openpyxl.load_workbook(io.BytesIO(raw_bytes), data_only=True, read_only=True)
     ws = wb.active
+    # Row-level export (DataGridExport) vs monthly summary: sniff the first rows
+    for r in ws.iter_rows(max_row=15, values_only=True):
+        low = [str(c).strip().lower() for c in (r or ()) if c is not None]
+        if any('effective' in t for t in low) and any('cert type' in t for t in low):
+            out = _parse_cert_detail(ws, date)
+            wb.close()
+            return out
     as_of = None
     idx = None
     rows = []
@@ -661,7 +743,7 @@ def parse_certs(raw_bytes):
                      'Incomplete Certs': inc, 'Annual Certs Due': ann, 'Total': tot})
     wb.close()
     rows.sort(key=lambda x: x['_sort'])
-    return {'as_of': as_of, 'rows': rows}
+    return {'as_of': as_of, 'rows': rows, 'detail': []}
 
 
 CERT_NUM_FMT = '0;-0;"-"'   # zero shows as a dash, like the Yardi report
@@ -673,7 +755,7 @@ def fmt_certs(wb_out, raw_bytes, date, prop):
     Layout: title rows 1-3 (green), header row 5 (gray), data from row 6,
     bold Total row with SUM formulas. Returns (ws, certs_data, tab_name).
     """
-    data = parse_certs(raw_bytes)
+    data = parse_certs(raw_bytes, date)
     rows = data['rows']
     n_cols = len(CERT_COLS)
     tab = f'Incomplete Certs {date}'
@@ -729,7 +811,22 @@ def fmt_certs(wb_out, raw_bytes, date, prop):
         cell.number_format = CERT_NUM_FMT
         cell.alignment = Alignment(horizontal='right', vertical='center')
 
-    for col, w in zip('ABCDE', (12, 12, 15, 16, 10)):
+    # Row-level export: list every cert under the monthly table
+    if data.get('detail'):
+        dr = total_row + 2
+        for i, h in enumerate(['Effective Date', 'Unit', 'Name', 'Prog Type', 'Cert Type'], start=1):
+            cell = ws.cell(dr, i, value=h)
+            cell.fill = gfill(GRAY_AR); cell.font = gfont(bold=True); cell.border = bblack()
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+        for k, d in enumerate(data['detail'], start=1):
+            vals = [d['date'], d['unit'], d['name'], d['prog'], d['type']]
+            for i, v in enumerate(vals, start=1):
+                cell = ws.cell(dr + k, i, value=v)
+                cell.font = gfont(); cell.fill = gfill(WHITE); cell.border = bgray()
+                cell.alignment = Alignment(horizontal='left' if i == 3 else 'center', vertical='center')
+                if i == 1: cell.number_format = 'MM/DD/YY'
+
+    for col, w in zip('ABCDE', (13, 12, 26, 16, 10)):
         ws.column_dimensions[col].width = w
     ws.freeze_panes = 'A6'
     data['start_row'] = start_row
@@ -2036,7 +2133,7 @@ def build_manager_summary(wb_out, date, prop, ws_summary, traffic_data=None, cer
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.57'})
+    return jsonify({'status':'ok','version':'9.58'})
 
 @app.route('/')
 def index():
@@ -2219,7 +2316,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.57</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.58</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
