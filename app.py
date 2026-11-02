@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.63 — Docker deploy on Render free tier (enables Tesseract OCR)"""
+"""Weekly Report Formatter v9.64 — Docker deploy on Render free tier (enables Tesseract OCR)"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -305,7 +305,7 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub, rent_lookup=None):
     data_start=7; rn=data_start
     for row in ev+cu+no:
         st=str(row[2] or '').strip().lower()
-        rc=RED_FONT if (not is_sub and st in ('notice','eviction','past')) else BLACK
+        rc=BLACK  # v9.64: all Tenant AR text black (Notice/Eviction rows were red)
         write_row(rn,row,rc); rn+=1
     tb=bblack()
     pos_end=rn-1
@@ -2176,7 +2176,7 @@ def build_manager_summary(wb_out, date, prop, ws_summary, traffic_data=None, cer
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.63'})
+    return jsonify({'status':'ok','version':'9.64'})
 
 @app.route('/')
 def index():
@@ -2353,7 +2353,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.63</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.64</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
