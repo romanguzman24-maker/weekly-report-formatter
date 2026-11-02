@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.62 — Docker deploy on Render free tier (enables Tesseract OCR)"""
+"""Weekly Report Formatter v9.63 — Docker deploy on Render free tier (enables Tesseract OCR)"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -172,16 +172,40 @@ def fmt_ua(wb_out, raw_bytes, date, prop):
     ws.freeze_panes='A10'
     return ws, len(V), len(N), len(O)
 
+def _tab_date(name):
+    """Pull a date out of a tab name like 'Tenant AR 11.01.26' or '1.26.26 Tenant AR'."""
+    m = re.search(r'(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})', name)
+    if not m: return datetime.min
+    mo, d, y = (int(x) for x in m.groups())
+    if y < 100: y += 2000
+    try: return datetime(y, mo, d)
+    except ValueError: return datetime.min
+
+
 def get_notes(wb, prefix):
+    """Notes from the most recent '<prefix>' tab in the uploaded workbook, keyed by Resident ID.
+
+    v9.63: picks the newest tab by the date in its name (not tab order), and
+    finds the notes column by its header (Comments / Delinquency notes / Notes)
+    instead of assuming the last column, since Tenant AR has a legend in N.
+    """
     notes={}
     tabs=[n for n in wb.sheetnames if prefix.lower() in n.lower()]
     if not tabs: return notes
-    rows=list(wb[tabs[-1]].iter_rows(values_only=True))
-    hi=next((i for i,r in enumerate(rows[:10]) if any(str(c or '').lower()=='resident' for c in r)),-1)
+    tab=max(tabs, key=lambda n: (_tab_date(n), tabs.index(n)))
+    rows=list(wb[tab].iter_rows(values_only=True))
+    hi=next((i for i,r in enumerate(rows[:10]) if r and any(str(c or '').strip().lower()=='resident' for c in r)),-1)
     if hi==-1: return notes
-    hdr=rows[hi]; ri=next((i for i,c in enumerate(hdr) if str(c or '').lower()=='resident'),-1); ni=len(hdr)-1
+    hdr=[str(c or '').strip().lower() for c in rows[hi]]
+    ri=hdr.index('resident')
+    ni=next((i for i,h in enumerate(hdr) if h in ('comments','comment','delinquency notes','notes','note')),-1)
+    if ni==-1:
+        ni=max((i for i,h in enumerate(hdr) if h), default=-1)
+    if ni<=ri: return notes
     for row in rows[hi+1:]:
-        id_=str(row[ri] or '').strip() if ri>=0 else ''; note=str(row[ni] or '').strip() if len(row)>ni else ''
+        if not row: continue
+        id_=str(row[ri] or '').strip() if ri<len(row) else ''
+        note=str(row[ni] or '').strip() if ni<len(row) else ''
         if id_ and note: notes[id_]=note
     return notes
 
@@ -274,8 +298,9 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub, rent_lookup=None):
             cell.font=gfont(color=rc); cell.fill=gfill(row_fill)
             cell.alignment=Alignment(horizontal='right' if c>=5 else 'left',vertical='center',wrap_text=False)
             if isn: cell.number_format='#,##0.00'
-        nc=ws.cell(rn,13); nc.value=None; nc.font=gfont(color=BLACK)
-        nc.fill=gfill(row_fill); nc.alignment=Alignment(horizontal='center',vertical='center',wrap_text=False)
+        # v9.63: carry last week's note forward (was being looked up, then dropped)
+        nc=ws.cell(rn,13); nc.value=note or None; nc.font=gfont(color=BLACK)
+        nc.fill=gfill(row_fill); nc.alignment=Alignment(horizontal='left',vertical='center',wrap_text=False)
         nc.number_format='@'
     data_start=7; rn=data_start
     for row in ev+cu+no:
@@ -2151,7 +2176,7 @@ def build_manager_summary(wb_out, date, prop, ws_summary, traffic_data=None, cer
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.62'})
+    return jsonify({'status':'ok','version':'9.63'})
 
 @app.route('/')
 def index():
@@ -2328,7 +2353,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.62</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.63</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
