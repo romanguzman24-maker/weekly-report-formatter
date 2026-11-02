@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.64 — Docker deploy on Render free tier (enables Tesseract OCR)"""
+"""Weekly Report Formatter v9.65 — Docker deploy on Render free tier (enables Tesseract OCR)"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -235,18 +235,7 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub, rent_lookup=None):
             cell.alignment=Alignment(horizontal='right' if ra else ('center' if c==13 else 'left'),vertical='center',wrap_text=False)
     for r in range(1,4): ws.cell(r,13).fill=gfill(GREEN); ws.cell(r,13).font=gfont(color=tc)
     
-    # Add legend for red highlighting (Tenant AR only, not SUB AR)
-    if not is_sub:
-        ws.merge_cells('N1:N3')
-        legend_cell = ws.cell(1, 14)
-        legend_cell.value = "Red = tenants who have unpaid full rent balance"
-        legend_cell.fill = gfill('FFFFC7CE')  # light red
-        legend_cell.font = gfont(bold=True, color=BLACK)
-        legend_cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-        # Border the legend
-        for r in range(1, 4):
-            ws.cell(r, 14).border = bblack()
-            ws.cell(r, 14).fill = gfill('FFFFC7CE')
+    # v9.65: red-highlight legend (N1:N3) removed
     hi=next((i for i,r in enumerate(rr[:10]) if r and any(str(c or '').lower()=='unit' for c in r) and any(str(c or '').lower()=='resident' for c in r)),5)
     ev,cu,no,cr=[],[],[],[]
     for row in rr[hi+1:]:
@@ -332,8 +321,6 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub, rent_lookup=None):
         cr_end=rn-1
         write_total(rn,cr_start,cr_end,'Credits Total'); rn+=1
     for i,w in enumerate([9,13,10,24,12,10,10,10,10,10,10,12,38],1): ws.column_dimensions[get_column_letter(i)].width=w
-    if not is_sub:
-        ws.column_dimensions['N'].width = 22
     ws.freeze_panes='A7'
     return ws, len(ev), len(cu), len(no), pos_end, data_start, red_count[0]
 
@@ -2176,7 +2163,7 @@ def build_manager_summary(wb_out, date, prop, ws_summary, traffic_data=None, cer
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.64'})
+    return jsonify({'status':'ok','version':'9.65'})
 
 @app.route('/')
 def index():
@@ -2353,7 +2340,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.64</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.65</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
