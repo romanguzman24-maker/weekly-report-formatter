@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.67 — Docker deploy on Render free tier (enables Tesseract OCR)"""
+"""Weekly Report Formatter v9.68 — Docker deploy on Render free tier (enables Tesseract OCR)"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -575,7 +575,9 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
 # ============================================================================
 # INCOMPLETE CERTS (Certs by Month) - v9.57, replaces Expiring Leases
 # ============================================================================
-CERT_COLS = ['Month', 'Status', 'Incomplete Certs', 'Annual Certs Due', 'Total']
+# v9.68: only Month, Status, Incomplete Certs are shown. Incomplete Certs now
+# counts every open cert that month (AR included); Annual/Total columns removed.
+CERT_COLS = ['Month', 'Status', 'Incomplete Certs']
 
 
 def _cert_num(v):
@@ -769,6 +771,8 @@ def fmt_certs(wb_out, raw_bytes, date, prop):
     """
     data = parse_certs(raw_bytes, date)
     rows = data['rows']
+    for r_ in rows:
+        r_['Incomplete Certs'] = r_['Total']
     n_cols = len(CERT_COLS)
     tab = f'Incomplete Certs {date}'
     if tab in wb_out.sheetnames: del wb_out[tab]
@@ -823,7 +827,7 @@ def fmt_certs(wb_out, raw_bytes, date, prop):
         cell.number_format = CERT_NUM_FMT
         cell.alignment = Alignment(horizontal='right', vertical='center')
 
-    for col, w in zip('ABCDE', (12, 14, 15, 16, 10)):
+    for col, w in zip('ABC', (12, 14, 15)):
         ws.column_dimensions[col].width = w
     ws.freeze_panes = 'A6'
     data['start_row'] = start_row
@@ -2173,7 +2177,7 @@ def too_large(e):
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.67'})
+    return jsonify({'status':'ok','version':'9.68'})
 
 @app.route('/')
 def index():
@@ -2353,7 +2357,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.67</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.68</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
