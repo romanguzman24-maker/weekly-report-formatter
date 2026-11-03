@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.66 — Docker deploy on Render free tier (enables Tesseract OCR)"""
+"""Weekly Report Formatter v9.67 — Docker deploy on Render free tier (enables Tesseract OCR)"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -1770,35 +1770,37 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
         # Blocks below move down as needed, so every eviction is listed
         for i, src_r in enumerate(ev_rows):
             rn = 27 + i
-            style(rn, EV_COL, str(tar_ws.cell(src_r, 1).value or '').strip(), align='center', border=AB)
+            uv = str(tar_ws.cell(src_r, 1).value or '').strip()
+            style(rn, EV_COL, int(uv) if uv.isdigit() else uv, align='center', border=AB)
             style(rn, EV_COL + 1, f"='{tar_ws.title}'!E{src_r}", align='right', border=AB, fmt='#,##0.00')
         top_end = max(top_end, 26 + len(ev_rows))
 
     # =========================================================================
-    # SECTION 6: Weekly Traffic (rows 25-31, cols F-K; moved from E in v9.61)
+    # SECTION 6: Weekly Traffic - v9.67: below NTV/Eviction at column B, one blank row above
     # =========================================================================
     if traffic_data:
-        TR_COL = 6  # column F
+        TR_COL = 2  # column B
+        TR_ROW = top_end + 2
         TR_COLS = 6
         tr_hdrs = ['Source', 'Leads', 'Prospects', 'Visits', 'Leases', 'Applications']
         active_sources = [(s, v) for s, v in traffic_data['rows'] if any(x != 0 for x in v)]
         date_range = traffic_data.get('date_range', date)
         
-        # Row 25: Title strip merged E:J
-        ws.merge_cells(start_row=25, start_column=TR_COL,
-                       end_row=25, end_column=TR_COL + TR_COLS - 1)
+        # Title strip
+        ws.merge_cells(start_row=TR_ROW, start_column=TR_COL,
+                       end_row=TR_ROW, end_column=TR_COL + TR_COLS - 1)
         for c in range(TR_COL, TR_COL + TR_COLS):
-            cell = ws.cell(25, c)
+            cell = ws.cell(TR_ROW, c)
             cell.fill = gfill(BLUE); cell.font = f9b
             cell.alignment = galign('center'); cell.border = AB
-        ws.cell(25, TR_COL).value = f'Weekly Traffic  " {date_range} "'
+        ws.cell(TR_ROW, TR_COL).value = f'Weekly Traffic  " {date_range} "'
         
         # Row 26: sub-headers
         for i, h in enumerate(tr_hdrs):
-            style(26, TR_COL + i, h, fill=BLUE, bold=True, align='center', border=AB)
+            style(TR_ROW + 1, TR_COL + i, h, fill=BLUE, bold=True, align='center', border=AB)
         
         # Data rows
-        rn = 27
+        rn = TR_ROW + 2
         for src, vals in active_sources:
             style(rn, TR_COL, src, align='left', border=AB)
             for i, v in enumerate(vals):
@@ -1806,7 +1808,7 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
             rn += 1
         
         # Total row
-        tr_data_start = 27
+        tr_data_start = TR_ROW + 2
         tr_data_end = rn - 1
         style(rn, TR_COL, 'Total', fill=BLUE, bold=True, align='center', border=AB)
         for i in range(1, TR_COLS):
@@ -1924,7 +1926,7 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
         'C': 15.43,   # 113px
         'D': 15.00,   # v9.59: was a 2.71 gutter; now a full column inside the B-aligned blocks
         'E': 13.00,   # v9.61: Eviction balance column
-        'F': 24.14,   # v9.61: Weekly Traffic 'Source' column moved here from E
+        'F': 15.00,   # v9.67: Negative Reviews (Traffic moved under NTV at B)
         'G': 13.00,   # All Time Rating
         'H': 14.00,   # Positive Reviews
         'I': 14.00,   # Negative Reviews
@@ -2171,7 +2173,7 @@ def too_large(e):
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.66'})
+    return jsonify({'status':'ok','version':'9.67'})
 
 @app.route('/')
 def index():
@@ -2351,7 +2353,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.66</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.67</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
