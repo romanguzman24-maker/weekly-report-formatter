@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.65 — Docker deploy on Render free tier (enables Tesseract OCR)"""
+"""Weekly Report Formatter v9.66 — Docker deploy on Render free tier (enables Tesseract OCR)"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -1097,8 +1097,9 @@ def parse_review_pdf(raw_bytes):
     }
     
     try:
-        # Convert PDF page to image at 300dpi (good balance of accuracy vs speed)
-        images = convert_from_bytes(raw_bytes, dpi=300)
+        # v9.66: page 1 only, grayscale. Converting every page at 300dpi ran the
+        # free Render instance out of memory on multi-page PDFs (Server error).
+        images = convert_from_bytes(raw_bytes, dpi=300, first_page=1, last_page=1, grayscale=True)
         if not images:
             return None
         
@@ -1337,7 +1338,10 @@ def parse_knock_image(raw_bytes):
     except ImportError:
         return None
     try:
-        img = Image.open(io.BytesIO(raw_bytes))
+        img = Image.open(io.BytesIO(raw_bytes)).convert('L')
+        # v9.66: cap very large snips so OCR stays fast and light on memory
+        if max(img.size) > 2400:
+            img.thumbnail((2400, 2400))
         text = pytesseract.image_to_string(img)
     except Exception:
         traceback.print_exc()
@@ -2161,9 +2165,13 @@ def build_manager_summary(wb_out, date, prop, ws_summary, traffic_data=None, cer
         ws.column_dimensions[col].width = 12
 
 
+@app.errorhandler(413)
+def too_large(e):
+    return jsonify({'error': 'Upload is over the 50 MB limit. Remove old history tabs from the weekly workbook (or upload last week\'s formatted report instead) and try again.'}), 413
+
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.65'})
+    return jsonify({'status':'ok','version':'9.66'})
 
 @app.route('/')
 def index():
@@ -2289,6 +2297,9 @@ def format_report():
         fname=f'{prefix}_Weekly_{date.replace(".","")}_Formatted.xlsx'
         return send_file(patched,mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',as_attachment=True,download_name=fname)
     except Exception as e:
+        from werkzeug.exceptions import RequestEntityTooLarge
+        if isinstance(e, RequestEntityTooLarge):
+            return too_large(e)
         traceback.print_exc()
         return jsonify({'error':str(e)}),500
 
@@ -2340,7 +2351,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.65</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.66</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
@@ -2391,8 +2402,10 @@ async function run(){
     const resp=await fetch("/format",{method:"POST",body:form});
     P(80);
     if(!resp.ok){
-      let msg="Server error";
-      try{const e=await resp.json();msg=e.error||msg;}catch(ex){}
+      let msg="Server error ("+resp.status+")";
+      try{const e=await resp.json();msg=e.error||msg;}catch(ex){
+        if(resp.status===502||resp.status===503||resp.status===504) msg="Server error ("+resp.status+"). The server timed out or ran out of memory. Try again, and if it repeats, try without the Opiniion PDF and send Roman a screenshot.";
+      }
       L("Error: "+msg,"le");btn.disabled=false;return;
     }
     const blob=await resp.blob();P(100);
