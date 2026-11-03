@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.69 — Docker deploy on Render free tier (enables Tesseract OCR)"""
+"""Weekly Report Formatter v9.70 — Docker deploy on Render free tier (enables Tesseract OCR)"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -1756,16 +1756,13 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
             cell_c.font = f9; cell_c.border = AB
     
     # =========================================================================
-    # SECTION 5b: Eviction list (D25:E) - v9.61, right of NTV
+    # SECTION 5b: Eviction list (column D) - v9.61, right of NTV
     # Tenant AR rows with status Eviction or Past (same rule as F14 '@ legal').
-    # Balance is a live reference to Total Unpaid Charges on the Tenant AR tab.
+    # v9.70: Unit # only (Balance column removed).
     # =========================================================================
     EV_COL = 4  # column D
-    ws.merge_cells(start_row=25, start_column=EV_COL, end_row=25, end_column=EV_COL + 1)
     style(25, EV_COL, 'Eviction', fill=BLUE, bold=True, align='center', border=AB)
-    ws.cell(25, EV_COL + 1).fill = gfill(BLUE); ws.cell(25, EV_COL + 1).border = AB
     style(26, EV_COL, 'Unit #', fill=BLUE, bold=True, align='center', border=AB)
-    style(26, EV_COL + 1, 'Balance', fill=BLUE, bold=True, align='center', border=AB)
     if tar_ws:
         ev_rows = []
         for r in range(7, tar_ws.max_row + 1):
@@ -1777,7 +1774,6 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
             rn = 27 + i
             uv = str(tar_ws.cell(src_r, 1).value or '').strip()
             style(rn, EV_COL, int(uv) if uv.isdigit() else uv, align='center', border=AB)
-            style(rn, EV_COL + 1, f"='{tar_ws.title}'!E{src_r}", align='right', border=AB, fmt='#,##0.00')
         top_end = max(top_end, 26 + len(ev_rows))
 
     # =========================================================================
@@ -2178,7 +2174,7 @@ def too_large(e):
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.69'})
+    return jsonify({'status':'ok','version':'9.70'})
 
 @app.route('/')
 def index():
@@ -2358,7 +2354,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.69</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.70</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
