@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.70 — Docker deploy on Render free tier (enables Tesseract OCR)"""
+"""Weekly Report Formatter v9.71 — Docker deploy on Render free tier (enables Tesseract OCR)"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -461,11 +461,24 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         sc(4,' VACANT' if isvac else rname)
         sc(5,sq or 0,'center','#,##0')
         sc(6,mr or 0,'right','#,##0.00')
-        try: lg_val=0 if isvac else float(str(lg or 0).replace(',',''))
-        except: lg_val=0
+        # v9.71: Yardi exports Loss/Gain as a formula (Lease Rent - Market Rent).
+        # A fresh export has no saved result, so it was coming through as 0.
+        # Use the number when there is one, otherwise do the same math here.
+        def _num(v):
+            if isinstance(v, (int, float)): return float(v)
+            t = str(v or '').strip().replace(',', '').replace('$', '')
+            if t.startswith('(') and t.endswith(')'): t = '-' + t[1:-1]
+            try: return float(t)
+            except ValueError: return None
+        if isvac:
+            lg_val = 0
+        else:
+            lg_val = _num(lg)
+            if lg_val is None:
+                lr_n = _num(lr); mr_n = _num(mr)
+                lg_val = (lr_n - mr_n) if (lr_n is not None and mr_n is not None) else 0
         sc(7,lg_val,'right','#,##0.00')
-        try: sr_val=float(str(sr or 0).replace(',',''))
-        except: sr_val=0
+        sr_val = _num(sr) or 0
         sc(8,sr_val,'right','#,##0.00')
         try: tr_val=float(str(tr or 0).replace(',',''))
         except: tr_val=0
@@ -2174,7 +2187,7 @@ def too_large(e):
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.70'})
+    return jsonify({'status':'ok','version':'9.71'})
 
 @app.route('/')
 def index():
@@ -2354,7 +2367,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.70</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.71</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
