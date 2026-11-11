@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.71 — Docker deploy on Render free tier (enables Tesseract OCR)"""
+"""Weekly Report Formatter v9.72 — Docker deploy on Render free tier (enables Tesseract OCR)"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -34,6 +34,37 @@ def galign(h='left',v='center',wrap=False): return Alignment(horizontal=h,vertic
 T=Side(style='thin',color='FF000000'); TG=Side(style='thin',color='FFCCCCCC')
 def bblack(): return Border(top=T,bottom=T,left=T,right=T)
 def bgray():  return Border(top=TG,bottom=TG,left=TG,right=TG)
+
+def _as_dt(v):
+    """Cell value -> datetime or None (handles datetime, Excel serial, m/d/y text)."""
+    import datetime as _d
+    if isinstance(v, _d.datetime): return v
+    if isinstance(v, _d.date): return _d.datetime(v.year, v.month, v.day)
+    if isinstance(v, (int, float)) and 20000 < v < 80000:
+        return _d.datetime(1899, 12, 30) + _d.timedelta(days=float(v))
+    t = str(v or '').strip()
+    for f in ('%m/%d/%Y', '%m/%d/%y', '%Y-%m-%d'):
+        try: return _d.datetime.strptime(t, f)
+        except ValueError: pass
+    return None
+
+
+def _note_is_stale(note, report_dt):
+    """v9.72: True when every date written in a carried-forward note is before
+    the report date (e.g. 'scheduled to post 11/03/26' on an 11/10 report)."""
+    import datetime as _d
+    found = []
+    for m in re.finditer(r'(?<![\d/])(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?(?![\d/])', str(note or '')):
+        mo, dd, yy = int(m.group(1)), int(m.group(2)), m.group(3)
+        if not (1 <= mo <= 12 and 1 <= dd <= 31): continue
+        y = (int(yy) + (2000 if len(yy) == 2 else 0)) if yy else report_dt.year
+        try: dt = _d.datetime(y, mo, dd)
+        except ValueError: continue
+        if not yy and dt > report_dt + _d.timedelta(days=60):
+            dt = dt.replace(year=dt.year - 1)
+        found.append(dt)
+    return bool(found) and max(found) < report_dt
+
 
 def parse_ua(ws):
     out=[]; status='Occupied'
@@ -169,7 +200,7 @@ def fmt_ua(wb_out, raw_bytes, date, prop):
         ws.column_dimensions[col].width=w
     ws.row_dimensions[1].height=15.75
     for r in range(2,8): ws.row_dimensions[r].height=15.0
-    ws.freeze_panes='A10'
+    ws.freeze_panes='A8'  # v9.72: headers are rows 6-7 (was A10, which froze two data rows)
     return ws, len(V), len(N), len(O)
 
 def _tab_date(name):
@@ -226,7 +257,8 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub, rent_lookup=None):
         ws.cell(ti+1,1).value=str(rr[ti][0] if ti<len(rr) and rr[ti] else '')
     h4=['','','','','Total','','','','','','','','']
     h5=['','','','','Unpaid','0-30','31-60','61-90','Over 90','','','','']
-    h6=['Unit','Resident','Status','Name','Charges','days','days','days','days','Prepays','Suspense','Balance','Comments']
+    h6=['Unit','Resident','Status','Name','Charges','days','days','days','days','Prepays','Suspense','Balance','Comments' if is_sub else 'Delinquency notes']
+    report_dt=_report_date(date)
     for c in range(1,MC+1):
         ra=5<=c<=12
         for ri,hdr in [(4,h4),(5,h5),(6,h6)]:
@@ -260,20 +292,15 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub, rent_lookup=None):
     red_count = [0]  # mutable container so closure can update
     def write_row(rn, row, rc):
         rid=str(row[1] or '').strip(); note=prev_notes.get(rid,'')
-        # Determine if this row should be red-highlighted:
-        # ONLY for Tenant AR (not SUB AR), and only when rent_lookup is available
-        # Logic: any past-due bucket (F/G/H/I = cols 6/7/8/9) >= this tenant's full rent
+        # v9.72 B14 rule (validated): Total Unpaid Charges >= the tenant's monthly
+        # lease rent (Actual Rent at First, which has no Lease Rent column).
         has_balance = False
         if not is_sub and rent_lookup:
             unit = str(row[0] or '').strip()
             full_rent = rent_lookup.get(unit, 0)
             if full_rent > 0:
                 try:
-                    f_val = float(str(row[5] or 0).replace(',',''))   # 0-30 days
-                    g_val = float(str(row[6] or 0).replace(',',''))   # 31-60 days
-                    h_val = float(str(row[7] or 0).replace(',',''))   # 61-90 days
-                    i_val = float(str(row[8] or 0).replace(',',''))   # Over 90 days
-                    if max(f_val, g_val, h_val, i_val) >= full_rent:
+                    if float(str(row[4] or 0).replace(',','')) >= full_rent:
                         has_balance = True
                         red_count[0] += 1
                 except: pass
@@ -290,7 +317,9 @@ def fmt_ar(wb_out, raw_bytes, date, prev_notes, is_sub, rent_lookup=None):
             if isn: cell.number_format='#,##0.00'
         # v9.63: carry last week's note forward (was being looked up, then dropped)
         nc=ws.cell(rn,13); nc.value=note or None; nc.font=gfont(color=BLACK)
-        nc.fill=gfill(row_fill); nc.alignment=Alignment(horizontal='left',vertical='center',wrap_text=False)
+        # v9.72: light yellow when every date in the carried note is already past
+        nc.fill=gfill('FFFFF2CC' if (note and _note_is_stale(note, report_dt)) else row_fill)
+        nc.alignment=Alignment(horizontal='left',vertical='center',wrap_text=False)
         nc.number_format='@'
     data_start=7; rn=data_start
     for row in ev+cu+no:
@@ -390,6 +419,39 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         rname=str(row[name_idx] or '').strip() if len(row)>name_idx else ''
         if rname.strip().upper() in ('VACANT',' VACANT') or not rname.strip(): V.append((row,o))
         else: O.append((row,o))
+    # v9.72: applicant rows out. Yardi lists pre-leased applicants on the rent
+    # roll: a repeat unit number, a move-in after the as-of date, or $0 lease
+    # rent. First's export has no Lease Rent column, so it relies on the first two.
+    as_of = None
+    mm = re.search(r'(\d{1,2}/\d{1,2}/\d{2,4})', title3)
+    if mm: as_of = _as_dt(mm.group(1))
+    if as_of is None: as_of = _report_date(date)
+    mi_off = 9 if is_vaf_format else 11
+    def _mi(x):
+        row, o = x
+        return _as_dt(row[o+mi_off]) if len(row) > o+mi_off else None
+    vac_units = {str(r_[o_] or '').strip() for r_, o_ in V}
+    keep = []
+    for x in O:
+        row, o = x
+        mi = _mi(x)
+        if mi and mi > as_of: continue
+        if str(row[o] or '').strip() in vac_units: continue
+        if not is_vaf_format and len(row) > o+8:
+            try:
+                if float(str(row[o+8] or 0).replace(',', '')) == 0 and float(str(row[o+7] or 0).replace(',', '')) == 0:
+                    continue
+            except ValueError: pass
+        keep.append(x)
+    by_unit = {}
+    for x in keep:
+        by_unit.setdefault(str(x[0][x[1]] or '').strip(), []).append(x)
+    O = []
+    for u, xs in by_unit.items():
+        if len(xs) > 1:   # repeat unit: keep the resident who moved in first
+            import datetime as _dd
+            xs.sort(key=lambda x: _mi(x) or _dd.datetime.min)
+        O.append(xs[0])
     V.sort(key=lambda x:str(x[0][x[1]] or '').strip())
     O.sort(key=lambda x:str(x[0][x[1]] or '').strip())
 
@@ -1213,6 +1275,9 @@ def build_reputation_block(ws, reputation_data, start_row=34, start_col=5):
     f9 = gfont(sz=9)
     f9b = gfont(bold=True, sz=9)
     
+    # v9.72: no Opiniion data (not uploaded or didn't parse) -> blanks + "Not provided", not zeros
+    missing = (reputation_data is None or (reputation_data.get('overall_rating') is None
+               and reputation_data.get('overall_total') is None and not reputation_data.get('platforms')))
     # Default empty data shape
     if reputation_data is None:
         reputation_data = {
@@ -1270,13 +1335,18 @@ def build_reputation_block(ws, reputation_data, start_row=34, start_col=5):
             cell.fill = gfill(WHITE)
         else:
             # input value (blue fill)
-            cell.value = val if val is not None else 0
+            cell.value = val if val is not None else (None if missing else 0)
+            if col == start_col + 5: cell.value = 3.9
             cell.font = f9b
             cell.fill = gfill(BLUE)
             cell.number_format = '0.0' if kind == 'rating' else '0'
-    # Column K (end_col) on row 35 stays blank but bordered
+    # Column K (end_col) on row 35: blank, or "Not provided" when no Opiniion data
     ws.cell(r, end_col).border = AB
     ws.cell(r, end_col).fill = gfill(WHITE)
+    if missing:
+        ws.cell(r, end_col).value = 'Not provided'
+        ws.cell(r, end_col).font = gfont(bold=True, sz=9, color='FFC00000')
+        ws.cell(r, end_col).alignment = Alignment(horizontal='center', vertical='center')
     
     # ===== Row 36: 'Per Platform Breakdown' sub-header (merged E:K) =====
     r = start_row + 2
@@ -1320,7 +1390,7 @@ def build_reputation_block(ws, reputation_data, start_row=34, start_col=5):
         ]
         for col, val, kind in numeric_cols:
             cell = ws.cell(r, col)
-            cell.value = val if val is not None else 0
+            cell.value = None if missing else (val if val is not None else 0)
             cell.font = f9
             cell.fill = gfill(BLUE)
             cell.alignment = Alignment(horizontal='center', vertical='center')
@@ -1400,7 +1470,20 @@ KNOCK_METRICS = [
 ]
 
 
-def build_knock_tab(wb_out, date, prop, knock_data=None):
+def _prior_knock(wb):
+    """v9.72: This Week values (B6:B10) from the newest Knock CRM tab in the uploaded workbook."""
+    try:
+        tabs = [n for n in wb.sheetnames if 'knock crm' in n.lower()]
+        if not tabs: return None
+        tab = max(tabs, key=lambda n: (_tab_date(n), tabs.index(n)))
+        rows = list(wb[tab].iter_rows(min_row=6, max_row=6 + len(KNOCK_METRICS) - 1, max_col=2, values_only=True))
+        out = {i: (r[1] if len(r) > 1 else None) for i, r in enumerate(rows)}
+        return out if any(v is not None for v in out.values()) else None
+    except Exception:
+        return None
+
+
+def build_knock_tab(wb_out, date, prop, knock_data=None, prior=None):
     """Create the 'Knock CRM <date>' tab. Blue input cells for manual entry.
 
     Managers snip the Stats card from Knock CRM and type the five values in.
@@ -1443,6 +1526,8 @@ def build_knock_tab(wb_out, date, prop, knock_data=None):
             cell = ws.cell(r, col)
             if col == 2 and knock_data:
                 cell.value = knock_data.get(key)
+            if col == 3 and prior:   # v9.72: carried from last week's Knock tab
+                cell.value = prior.get(i)
             cell.fill = gfill(BLUE)
             cell.font = gfont(sz=9)
             cell.alignment = galign('center')
@@ -1511,8 +1596,9 @@ def build_knock_block(ws, knock_tab_name, start_row=45, start_col=5):
 
         for off, srccol in ((2, 'B'), (3, 'C')):
             cell = ws.cell(r, start_col + off)
-            cell.value = (f"=IFERROR('{knock_tab_name}'!{srccol}{src},\"\")"
-                          if knock_tab_name else None)
+            # v9.72: blank (not 0) when the Knock tab cell is empty
+            ref = f"'{knock_tab_name}'!{srccol}{src}"
+            cell.value = (f'=IF({ref}="","",{ref})' if knock_tab_name else None)
             cell.font = gfont(sz=9)
             cell.alignment = galign('center')
             cell.number_format = fmt
@@ -1750,10 +1836,37 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
     style(26, 2, 'Unit #', fill=BLUE, bold=True, align='center', border=AB)
     style(26, 3, 'Move-in year', fill=BLUE, bold=True, align='center', border=AB)
     
-    # Rows 27-28: NTV data (only border filled rows)
+    # Rows 27+: NTV data
     top_end = 26  # v9.62: lowest row used by NTV / Eviction / Traffic
-    for r in (27, 28):
-        v2 = src_vals.get((r, 2)); v3 = src_vals.get((r, 3))
+    ntv_rows = []
+    if ua_ws:
+        # v9.72: built from this week's UA Notice rows. For a pre-leased unit the
+        # incoming applicant's move-in is shown (applicant = prospect ID 'p...'
+        # or a move-in after the report date); otherwise the resident's.
+        rpt = _report_date(date)
+        units = {}
+        for r in range(8, ua_ws.max_row + 1):
+            if str(ua_ws.cell(r, 1).value or '').strip() != 'Notice': continue
+            u = str(ua_ws.cell(r, 2).value or '').strip()
+            if not u: continue
+            rid = str(ua_ws.cell(r, 3).value or '').strip().lower()
+            mi = _as_dt(ua_ws.cell(r, 15).value)
+            is_app = rid.startswith('p') or (mi is not None and mi > rpt)
+            units.setdefault(u, []).append((is_app, mi))
+        for u in sorted(units):
+            apps = [m for a, m in units[u] if a and m]
+            res = [m for a, m in units[u] if not a and m]
+            mi = (max(apps) if apps else (max(res) if res else None))
+            ntv_rows.append((int(u) if u.isdigit() else u, mi))
+    else:
+        # No UA uploaded: carry last week's NTV units, but only real unit numbers
+        # (the rows under NTV can now hold other blocks in last week's file)
+        for r in range(27, 60):
+            v2 = src_vals.get((r, 2)); v3 = src_vals.get((r, 3))
+            if not re.match(r'^\d{2,5}(-\d{3})?$', str(v2 or '').strip()): break
+            ntv_rows.append((v2, v3))
+    for i, (v2, v3) in enumerate(ntv_rows):
+        r = 27 + i
         if v2 or v3:
             top_end = max(top_end, r)
             cell_b = ws.cell(r, 2)
@@ -1878,12 +1991,15 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
     ws['B3'] = date
     
     occ_count = 0
+    leased = 0
     if ua_ws:
         V = N = kA = kP = sP = leased = 0
+        _vset, _nset = set(), set()   # v9.72: count units, not rows (pre-leased units list the applicant too)
         for r in range(8, ua_ws.max_row + 1):
             st = str(ua_ws.cell(r, 1).value or '').strip()
-            if st == 'Vacant': V += 1
-            if st == 'Notice': N += 1
+            _u = str(ua_ws.cell(r, 2).value or '').strip()
+            if st == 'Vacant' and _u not in _vset: V += 1; _vset.add(_u)
+            if st == 'Notice' and _u not in _nset: N += 1; _nset.add(_u)
             if st in ('Vacant', 'Notice'):
                 if ua_ws.cell(r, 5).value: kA += 1
                 if ua_ws.cell(r, 6).value: kP += 1
@@ -1893,7 +2009,9 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
                 try: leased += float(ua_ws.cell(r, 9).value or 0)
                 except: pass
         ws['B6'] = -V; ws['B7'] = kA; ws['B8'] = kP; ws['B9'] = sP; ws['B10'] = -N
-        ws.cell(16, 2).value = occ_count
+        # v9.72: physically occupied = total units - vacant (Notice/Eviction still live there)
+        ws.cell(16, 2).value = '=B5+B6'
+    if ua_ws or rr_ws:
         if rr_ws:
             rr_leased = 0
             for rr_r in range(6, rr_ws.max_row + 1):
@@ -1925,8 +2043,15 @@ def build_weekly_summary(wb_out, wb_ro, date, prop, ua_ws=None, tar_ws=None, sar
         return 0
     if tar_total == 0 and tar_ws: tar_total = getT(tar_ws)
     if sar_total == 0 and sar_ws: sar_total = getT(sar_ws)
-    ws['C18'] = tar_total
-    ws['C19'] = sar_total
+    # v9.72: link to each AR tab's Total row instead of typing the number in
+    def _total_ref(aw, fallback):
+        if not aw: return fallback
+        for r in range(7, aw.max_row + 1):
+            if str(aw.cell(r, 1).value or '').strip().lower() == 'total':
+                return f"='{aw.title}'!E{r}"
+        return fallback
+    ws['C18'] = _total_ref(tar_ws, tar_total)
+    ws['C19'] = _total_ref(sar_ws, sar_total)
     
     # =========================================================================
     # Column widths
@@ -2187,7 +2312,7 @@ def too_large(e):
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.71'})
+    return jsonify({'status':'ok','version':'9.72'})
 
 @app.route('/')
 def index():
@@ -2224,10 +2349,19 @@ def format_report():
                 unit_val = str(rr_ws.cell(rr_r, 1).value or '').strip()
                 if not unit_val: continue
                 try:
-                    tenant_rent_val = float(rr_ws.cell(rr_r, 9).value or 0)
+                    # v9.72: lease rent (col J); Tenant Rent (col I) if lease rent is blank
+                    tenant_rent_val = float(rr_ws.cell(rr_r, 10).value or 0) or float(rr_ws.cell(rr_r, 9).value or 0)
                     if tenant_rent_val > 0:
                         rent_lookup[unit_val] = tenant_rent_val
                 except: pass
+        if ua_ws:
+            # v9.72: fill gaps (or no Rent Roll uploaded) from UA Resident Rent
+            for ua_r in range(8, ua_ws.max_row + 1):
+                if str(ua_ws.cell(ua_r, 1).value or '').strip() not in ('Occupied', 'Notice'): continue
+                u = str(ua_ws.cell(ua_r, 2).value or '').strip()
+                try: rv = float(ua_ws.cell(ua_r, 8).value or 0)
+                except (TypeError, ValueError): rv = 0
+                if u and rv > 0 and u not in rent_lookup: rent_lookup[u] = rv
         tar_f=request.files.get('tar')
         tar_red_count=0
         if tar_f:
@@ -2277,7 +2411,7 @@ def format_report():
                 knock_data=None
         knock_tab_name=None
         try:
-            _,knock_tab_name=build_knock_tab(wb_out,date,prop,knock_data)
+            _,knock_tab_name=build_knock_tab(wb_out,date,prop,knock_data,_prior_knock(wb_ro))
         except Exception:
             traceback.print_exc()
             knock_tab_name=None
@@ -2367,7 +2501,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.71</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.72</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
