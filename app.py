@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.72 — Docker deploy on Render free tier (enables Tesseract OCR)"""
+"""Weekly Report Formatter v9.73 — Docker deploy on Render free tier (enables Tesseract OCR)"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -646,6 +646,19 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         ws.column_dimensions[col].width=w
     for r in range(1,5): ws.row_dimensions[r].height=14
     ws.freeze_panes='A6'
+    # v9.73: the standard Yardi Rent Roll leaves Sub Rent at 0 for every unit.
+    # Only the JEMCOR_subrent report carries it, so flag the wrong report.
+    if O:
+        any_sub = False
+        for r_ in range(6, ws.max_row + 1):
+            v_ = ws.cell(r_, 8).value
+            if isinstance(v_, (int, float)) and v_ != 0 and re.match(r'^\d', str(ws.cell(r_, 1).value or '')):
+                any_sub = True; break
+        if not any_sub:
+            wc = ws.cell(4, 1)
+            wc.value = (str(wc.value or '') + '    |    SUB RENT IS 0 FOR EVERY UNIT: this is the standard Rent Roll. '
+                        'Upload the JEMCOR_subrent report from Yardi instead.').strip(' |')
+            wc.font = gfont(bold=True, color='FFC00000')
     return ws, len(V), len(O)
 
 # ============================================================================
@@ -2312,7 +2325,7 @@ def too_large(e):
 
 @app.route('/health')
 def health():
-    return jsonify({'status':'ok','version':'9.72'})
+    return jsonify({'status':'ok','version':'9.73'})
 
 @app.route('/')
 def index():
@@ -2501,7 +2514,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.72</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.73</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
@@ -2515,7 +2528,7 @@ select:focus,input:focus{border-color:var(--g);}
       <div class="slot" id="s-ua"><input type="file" id="f-ua" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#7AD694;"></div><span class="sl">Unit Availability</span></div><div class="ss">Onsite &rarr; Analytics &rarr; Unit Availability Details</div><div class="sn2" id="n-ua">Click or drag file here</div></div>
       <div class="slot" id="s-tar"><input type="file" id="f-tar" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#F28E86;"></div><span class="sl">Tenant AR</span></div><div class="ss">Analytics &rarr; Receivable Aging (Excl. HUD)</div><div class="sn2" id="n-tar">Click or drag file here</div></div>
       <div class="slot" id="s-sar"><input type="file" id="f-sar" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#8CB5F9;"></div><span class="sl">Subsidy AR</span></div><div class="ss">Analytics &rarr; Receivable Aging (HUD Only)</div><div class="sn2" id="n-sar">Click or drag file here</div></div>
-      <div class="slot" id="s-rr"><input type="file" id="f-rr" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#C4A0F5;"></div><span class="sl">Rent Roll</span></div><div class="ss">Onsite &rarr; Analytics &rarr; Rent Roll</div><div class="sn2" id="n-rr">Click or drag file here</div></div>
+      <div class="slot" id="s-rr"><input type="file" id="f-rr" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#C4A0F5;"></div><span class="sl">Rent Roll</span></div><div class="ss">Yardi &rarr; JEMCOR_subrent report (not the standard Rent Roll)</div><div class="sn2" id="n-rr">Click or drag file here</div></div>
       <div class="slot" id="s-tr"><input type="file" id="f-tr" accept=".xlsx,.xls,.xlsm,.csv"/><div class="sh"><div class="dot" style="background:#F5C842;"></div><span class="sl">Weekly Traffic</span></div><div class="ss">Ad Spend &amp; Traffic Report (CSV or Excel)</div><div class="sn2" id="n-tr">Click or drag file here</div></div>
       <div class="slot" id="s-ic"><input type="file" id="f-ic" accept=".xlsx,.xls,.xlsm"/><div class="sh"><div class="dot" style="background:#FDD868;"></div><span class="sl">Incomplete Certs</span></div><div class="ss">Yardi &rarr; Certs by Month</div><div class="sn2" id="n-ic">Click or drag file here</div></div>
       <div class="slot full" id="s-kn"><input type="file" id="f-kn" accept="image/png,image/jpeg"/><div class="sh"><div class="dot" style="background:#F5A0C8;"></div><span class="sl">Knock CRM Stats (snip)</span></div><div class="ss">Knock CRM &rarr; dashboard &rarr; snip the Stats card</div><div class="sn2" id="n-kn">Click or drag image here</div></div>
