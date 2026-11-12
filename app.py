@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Report Formatter v9.73 — Docker deploy on Render free tier (enables Tesseract OCR)"""
+"""Weekly Report Formatter v9.74 — Docker deploy on Render free tier (enables Tesseract OCR)"""
 from flask import Flask, request, send_file, render_template_string, jsonify
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -646,19 +646,7 @@ def fmt_rr(wb_out, raw_bytes, date, prop):
         ws.column_dimensions[col].width=w
     for r in range(1,5): ws.row_dimensions[r].height=14
     ws.freeze_panes='A6'
-    # v9.73: the standard Yardi Rent Roll leaves Sub Rent at 0 for every unit.
-    # Only the JEMCOR_subrent report carries it, so flag the wrong report.
-    if O:
-        any_sub = False
-        for r_ in range(6, ws.max_row + 1):
-            v_ = ws.cell(r_, 8).value
-            if isinstance(v_, (int, float)) and v_ != 0 and re.match(r'^\d', str(ws.cell(r_, 1).value or '')):
-                any_sub = True; break
-        if not any_sub:
-            wc = ws.cell(4, 1)
-            wc.value = (str(wc.value or '') + '    |    SUB RENT IS 0 FOR EVERY UNIT: this is the standard Rent Roll. '
-                        'Upload the JEMCOR_subrent report from Yardi instead.').strip(' |')
-            wc.font = gfont(bold=True, color='FFC00000')
+    # v9.74: Sub Rent warning on row 4 removed
     return ws, len(V), len(O)
 
 # ============================================================================
@@ -2514,7 +2502,7 @@ select:focus,input:focus{border-color:var(--g);}
 .dlb:hover{background:#3d8a53;}
 @media(max-width:600px){.hdr{padding:16px;}.main{padding:16px 12px 50px;}.grid{grid-template-columns:1fr;}.slot.full{grid-column:1;}}
 </style></head><body>
-<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.73</div></div>
+<div class="hdr"><div class="hi">&#127970;</div><div><h1>Weekly Report Formatter</h1><p>Occupancy &amp; Delinquency &middot; FPI Management</p></div><div class="hv">v9.74</div></div>
 <div class="main">
   <div class="card"><div class="sn">STEP 01</div><div class="ct">Select Property &amp; Enter Date</div><div class="cd">Choose the property and enter this week\'s report date.</div>
     <select id="prop" style="width:100%;margin-bottom:10px;"><option value="Village at Madrone (fka Village at Morgan Hill) (x93)">Village at Madrone (x93)</option><option value="Village at First">Village at First</option><option value="Village at Santa Teresa">Village at Santa Teresa</option></select>
